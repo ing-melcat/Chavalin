@@ -44,6 +44,11 @@ const uint8_t  PWM_RES  = 8;
 #define PIN_S3      20   // GPIO 20: S3
 #define PIN_LED_ON   4   // GPIO 4: Emisores IR
 
+// --- PIN TURBINA (ESC BRUSHLESS PWM 50 Hz) ---
+#define PIN_TURBINA  5   // GPIO 5: Señal PWM 50 Hz (1000-2000 us) para ESC
+const uint32_t ESC_PWM_FREQ = 50;
+const uint8_t  ESC_PWM_RES  = 14; // 0..16383 (~1.22 us por paso)
+
 // --- VARIABLES DE SENSORES Y CALIBRACIÓN ---
 uint16_t lecturas_mv[16]; // Orden lógico Left->Right: índice 0 = I0 (Izq) .. 15 = I15 (Der)
 uint16_t base_mv[16];
@@ -55,12 +60,15 @@ inline uint8_t canalFisico(uint8_t pos_izq_der) {
   return pos_izq_der; // Extremo izq (pos 0) = I0 (CH00); extremo der (pos 15) = I15 (CH15)
 }
 
-// --- VARIABLES DE CONTROL PID Y MOTORES ---
+// --- VARIABLES DE CONTROL PID, MOTORES Y TURBINA ---
 volatile bool seguidor_activo = false;
+volatile bool turbina_manual = false;
 volatile bool test_motores_pendiente = false;
 volatile bool calibrar_pendiente = false;
 
 int velocidad_base = 120;
+int turbina_objetivo_pct = 0; // 0 a 100%
+int turbina_pct = 0;          // Valor actual aplicado al ESC
 float Kp = 0.35f;
 float Ki = 0.00f;
 float Kd = 0.15f;
@@ -107,6 +115,13 @@ void setMotorB(int speed) {
 void setMotors(int sL, int sR) {
   setMotorA(sL);
   setMotorB(sR);
+}
+
+void setTurbina(int pct) {
+  turbina_pct = constrain(pct, 0, 100);
+  uint32_t us = map(turbina_pct, 0, 100, 1000, 2000);
+  uint32_t duty = (us * ((1UL << ESC_PWM_RES) - 1)) / 20000UL;
+  ledcWrite(PIN_TURBINA, duty);
 }
 
 void stopMotors() {
@@ -235,12 +250,15 @@ static esp_err_t handleRoot(httpd_req_t *req) {
 }
 
 static esp_err_t handleData(httpd_req_t *req) {
-  char json[420];
+  char json[460];
+  bool t_activa = (turbina_pct > 0);
   int len = snprintf(json, sizeof(json),
-    "{\"run\":%s,\"err\":%.0f,\"mL\":%d,\"mR\":%d,"
+    "{\"run\":%s,\"tOn\":%s,\"turb\":%d,\"err\":%.0f,\"mL\":%d,\"mR\":%d,"
     "\"s\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u],"
     "\"mv\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}",
     seguidor_activo ? "true" : "false",
+    t_activa ? "true" : "false",
+    turbina_pct,
     error_actual, motor_L, motor_R,
     norm_s[0], norm_s[1], norm_s[2], norm_s[3],
     norm_s[4], norm_s[5], norm_s[6], norm_s[7],
@@ -264,12 +282,23 @@ static esp_err_t handleCmd(httpd_req_t *req) {
       if (strcmp(c, "start") == 0) {
         seguidor_activo = true;
         integral = 0;
+        if (turbina_objetivo_pct > 0) setTurbina(turbina_objetivo_pct);
       } else if (strcmp(c, "stop") == 0) {
         seguidor_activo = false;
+        turbina_manual = false;
         stopMotors();
+        setTurbina(0);
+      } else if (strcmp(c, "turb_on") == 0) {
+        turbina_manual = true;
+        setTurbina(turbina_objetivo_pct);
+      } else if (strcmp(c, "turb_off") == 0) {
+        turbina_manual = false;
+        setTurbina(0);
       } else if (strcmp(c, "calibrate") == 0) {
         seguidor_activo = false;
+        turbina_manual = false;
         stopMotors();
+        setTurbina(0);
         calibrar_pendiente = true;
       } else if (strcmp(c, "test") == 0) {
         seguidor_activo = false;
@@ -282,12 +311,16 @@ static esp_err_t handleCmd(httpd_req_t *req) {
 }
 
 static esp_err_t handlePID(httpd_req_t *req) {
-  char q[96], val[24];
+  char q[128], val[24];
   if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
     if (httpd_query_key_value(q, "spd", val, sizeof(val)) == ESP_OK) velocidad_base = constrain(atoi(val), 0, 255);
     if (httpd_query_key_value(q, "kp",  val, sizeof(val)) == ESP_OK) Kp = atof(val);
     if (httpd_query_key_value(q, "ki",  val, sizeof(val)) == ESP_OK) Ki = atof(val);
     if (httpd_query_key_value(q, "kd",  val, sizeof(val)) == ESP_OK) Kd = atof(val);
+    if (httpd_query_key_value(q, "turb", val, sizeof(val)) == ESP_OK) {
+      turbina_objetivo_pct = constrain(atoi(val), 0, 100);
+      if (seguidor_activo || turbina_manual) setTurbina(turbina_objetivo_pct);
+    }
   }
   httpd_resp_set_type(req, "text/plain");
   return httpd_resp_send(req, "OK", 2);
@@ -327,6 +360,10 @@ void setup() {
   ledcAttach(PIN_MOT_B1, PWM_FREQ, PWM_RES);
   ledcAttach(PIN_MOT_B2, PWM_FREQ, PWM_RES);
   stopMotors();
+
+  // Turbina ESC (50 Hz, armado seguro a 1000 us)
+  ledcAttach(PIN_TURBINA, ESC_PWM_FREQ, ESC_PWM_RES);
+  setTurbina(0);
 
   // Mux & IR
   pinMode(PIN_S0, OUTPUT);
@@ -404,7 +441,9 @@ void loop() {
     char ch = Serial.read();
     if (ch == 's') {
       seguidor_activo = false;
+      turbina_manual = false;
       stopMotors();
+      setTurbina(0);
     }
   }
 

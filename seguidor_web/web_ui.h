@@ -121,6 +121,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="actions">
       <button onclick="sendCmd('calibrate')">Calibrar Sensores</button>
       <button id="btnRun" class="primary" onclick="toggleRun()">Arrancar Seguidor</button>
+      <button id="btnTurb" onclick="toggleTurb()">Turbina: OFF</button>
       <button onclick="sendCmd('test')">Test Motores</button>
       <button class="danger" onclick="sendCmd('stop')">PARO (E-STOP)</button>
       <button onclick="clearChart()">Limpiar Gráfica</button>
@@ -132,6 +133,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="param-box"><label>Estado</label><div class="val" id="valMode">MANUAL</div></div>
     <div class="param-box"><label>Error Línea</label><div class="val" id="valError">0</div></div>
     <div class="param-box"><label>Base Speed</label><input type="number" id="inSpeed" value="120" min="0" max="255"></div>
+    <div class="param-box"><label>Turbina (%)</label><input type="number" id="inTurb" value="0" min="0" max="100"></div>
     <div class="param-box"><label>Kp</label><input type="number" id="inKp" value="0.35" step="0.05"></div>
     <div class="param-box"><label>Ki</label><input type="number" id="inKi" value="0.00" step="0.01"></div>
     <div class="param-box"><label>Kd</label><input type="number" id="inKd" value="0.15" step="0.05"></div>
@@ -217,6 +219,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   let running = false;
+  let turbOn = false;
   const maxPoints = 120;
   const histL = new Array(maxPoints).fill(0);
   const histR = new Array(maxPoints).fill(0);
@@ -283,6 +286,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const btnRun = document.getElementById('btnRun');
       btnRun.textContent = running ? 'Detener Seguidor' : 'Arrancar Seguidor';
       btnRun.className = running ? 'active' : 'primary';
+
+      turbOn = !!d.tOn;
+      const btnTurb = document.getElementById('btnTurb');
+      btnTurb.textContent = turbOn ? `Turbina: ON (${d.turb}%)` : 'Turbina: OFF';
+      btnTurb.className = turbOn ? 'active' : '';
+
       document.getElementById('valMode').textContent = running ? 'AUTO (PID)' : 'MANUAL';
       document.getElementById('valError').textContent = d.err;
 
@@ -317,12 +326,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     sendCmd(running ? 'stop' : 'start');
   }
 
+  async function toggleTurb() {
+    if (!turbOn) await applyPID();
+    await sendCmd(turbOn ? 'turb_off' : 'turb_on');
+  }
+
   async function applyPID() {
-    const spd = document.getElementById('inSpeed').value;
-    const kp  = document.getElementById('inKp').value;
-    const ki  = document.getElementById('inKi').value;
-    const kd  = document.getElementById('inKd').value;
-    await fetch(`/api/pid?spd=${spd}&kp=${kp}&ki=${ki}&kd=${kd}`);
+    const spd  = document.getElementById('inSpeed').value;
+    const turb = document.getElementById('inTurb').value;
+    const kp   = document.getElementById('inKp').value;
+    const ki   = document.getElementById('inKi').value;
+    const kd   = document.getElementById('inKd').value;
+    await fetch(`/api/pid?spd=${spd}&turb=${turb}&kp=${kp}&ki=${ki}&kd=${kd}`);
   }
 
   pollData();
