@@ -1,0 +1,198 @@
+{
+    "$schema": "https://schemas.kicad.org/drc.v1.json",
+    "coordinate_units": "mm",
+    "date": "2026-11-11T00:29:11",
+    "ignored_checks": [
+        {
+            "description": "Footprint has no courtyard defined",
+            "key": "missing_courtyard"
+        },
+        {
+            "description": "Track endpoint not centered on via",
+            "key": "track_not_centered_on_via"
+        },
+        {
+            "description": "Tuning profile track geometries",
+            "key": "tuning_profile_track_geometries"
+        },
+        {
+            "description": "Footprint doesn't match symbol's footprint filters",
+            "key": "footprint_filters_mismatch"
+        },
+        {
+            "description": "Footprint component type doesn't match footprint pads",
+            "key": "footprint_type_mismatch"
+        }
+    ],
+    "included_severities": [
+        "error",
+        "warning"
+    ],
+    "kicad_version": "10.0.6",
+    "schematic_parity": [],
+    "source": "v1_enrutado.kicad_pcb",
+    "unconnected_items": [],
+    "violations": [
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 90.53,
+                        "y": 126.48
+                    },
+                    "uuid": "60b3ff9d-69fe-4b89-b269-5f899a302241"
+                },
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 126.6
+                    },
+                    "uuid": "893bbb07-b964-47e9-a2ec-b2ead0e79328"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 126.6
+                    },
+                    "uuid": "893bbb07-b964-47e9-a2ec-b2ead0e79328"
+                },
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 127.36,
+                        "y": 139.18
+                    },
+                    "uuid": "d72d91a7-1a75-4033-a25c-5598fc5d635f"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 126.6
+                    },
+                    "uuid": "893bbb07-b964-47e9-a2ec-b2ead0e79328"
+                },
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.46,
+                        "y": 126.48
+                    },
+                    "uuid": "a8b511c6-e98d-4bb7-9e65-521b6155bce5"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 127.36,
+                        "y": 139.18
+                    },
+                    "uuid": "d72d91a7-1a75-4033-a25c-5598fc5d635f"
+                },
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 139.3
+                    },
+                    "uuid": "e076bdf5-99f8-429f-9725-cd95fcddccf4"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.46,
+                        "y": 126.48
+                    },
+                    "uuid": "a8b511c6-e98d-4bb7-9e65-521b6155bce5"
+                },
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 139.3
+                    },
+                    "uuid": "e076bdf5-99f8-429f-9725-cd95fcddccf4"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 126.6
+                    },
+                    "uuid": "38c89c5b-1405-49fd-a8f0-28b4f72cd1fe"
+                },
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 90.53,
+                        "y": 126.48
+                    },
+                    "uuid": "60b3ff9d-69fe-4b89-b269-5f899a302241"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        },
+        {
+            "description": "Silkscreen clearance",
+            "items": [
+                {
+                    "description": "Segmento de U4 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.49,
+                        "y": 126.6
+                    },
+                    "uuid": "38c89c5b-1405-49fd-a8f0-28b4f72cd1fe"
+                },
+                {
+                    "description": "Segmento de U3 en F.Silkscreen",
+                    "pos": {
+                        "x": 165.46,
+                        "y": 126.48
+                    },
+                    "uuid": "a8b511c6-e98d-4bb7-9e65-521b6155bce5"
+                }
+            ],
+            "severity": "warning",
+            "type": "silk_overlap"
+        }
+    ]
+}
