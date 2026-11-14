@@ -1,0 +1,7 @@
+# Archivos temporales y candados de KiCad
+~*.lck
+*.lck
+.history/
+
+# Binarios pesados externos
+*.jar
