@@ -49,18 +49,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     /* Telemetry & PID grid */
     .params-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px;
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(125px, 1fr)); gap: 8px;
     }
     .param-box {
       background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
       display: flex; flex-direction: column; gap: 4px;
     }
     .param-box label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .param-box .val { font-size: 1.1rem; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
-    .param-box input {
+    .param-box .val { font-size: 1.05rem; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .param-box input, .param-box select {
       background: #090e1a; border: 1px solid var(--border); color: var(--cyan);
-      padding: 4px 8px; border-radius: 4px; font-size: 0.95rem; font-weight: 700; width: 100%;
+      padding: 4px 8px; border-radius: 4px; font-size: 0.92rem; font-weight: 700; width: 100%;
     }
+    .param-actions {
+      display: flex; gap: 6px; height: 100%; align-items: stretch;
+    }
+    .param-actions button { padding: 6px 8px; font-size: 0.78rem; }
 
     /* Main Visuals Row */
     .main-row {
@@ -128,17 +132,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
-  <!-- PID & Telemetry Readouts -->
+  <!-- Dynamic PID & Telemetry Readouts -->
   <div class="params-grid">
-    <div class="param-box"><label>Estado</label><div class="val" id="valMode">MANUAL</div></div>
+    <div class="param-box"><label>Estado</label><div class="val" id="valMode">PITS 12ms</div></div>
     <div class="param-box"><label>Error Línea</label><div class="val" id="valError">0</div></div>
-    <div class="param-box"><label>Base Speed</label><input type="number" id="inSpeed" value="120" min="0" max="255"></div>
-    <div class="param-box"><label>Turbina (%)</label><input type="number" id="inTurb" value="0" min="0" max="100"></div>
-    <div class="param-box"><label>Kp</label><input type="number" id="inKp" value="0.35" step="0.05"></div>
-    <div class="param-box"><label>Ki</label><input type="number" id="inKi" value="0.00" step="0.01"></div>
-    <div class="param-box"><label>Kd</label><input type="number" id="inKd" value="0.15" step="0.05"></div>
-    <div class="param-box" style="justify-content:center;">
-      <button class="primary" style="height:100%;" onclick="applyPID()">Aplicar PID</button>
+    <div class="param-box">
+      <label>Perfil NVS</label>
+      <select id="selProfile" onchange="onProfileChange()">
+        <option value="pits">Pits 12 ms</option>
+        <option value="comp">Comp 2 ms</option>
+      </select>
+    </div>
+    <div class="param-box"><label>Vel Recta</label><input type="number" id="inVelR" value="142" min="0" max="255" step="1"></div>
+    <div class="param-box"><label>Vel Curva</label><input type="number" id="inVelC" value="62" min="0" max="255" step="1"></div>
+    <div class="param-box"><label>K Freno</label><input type="number" id="inKFreno" value="160" min="0" max="255" step="1"></div>
+    <div class="param-box"><label>Kp Base</label><input type="number" id="inKpBase" value="0.29" min="0" max="5" step="0.01"></div>
+    <div class="param-box"><label>Kp Curva</label><input type="number" id="inKpCurva" value="0.50" min="0" max="5" step="0.01"></div>
+    <div class="param-box"><label>Kd</label><input type="number" id="inKd" value="0.012" min="0" max="1" step="0.001"></div>
+    <div class="param-box"><label>Turbina (%)</label><input type="number" id="inTurb" value="40" min="0" max="100" step="1"></div>
+    <div class="param-box"><label>Turb Curva (%)</label><input type="number" id="inTurbC" value="60" min="0" max="100" step="1"></div>
+    <div class="param-box" style="justify-content:center; grid-column: span 1;">
+      <div class="param-actions">
+        <button id="btnApply" class="primary" style="flex:1;" onclick="applyPID()">Aplicar PID</button>
+        <button title="Restaurar calibración @sim-math" onclick="resetPID()">Reset</button>
+      </div>
     </div>
   </div>
 
@@ -220,10 +237,46 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   let running = false;
   let turbOn = false;
+  let configLoaded = false;
+  let cfgCache = {
+    pits: { vr: 142, vc: 62, kf: 160, kpb: 0.29, kpc: 0.50, kd: 0.012, tb: 40, tc: 60 },
+    comp: { vr: 150, vc: 68, kf: 195, kpb: 0.34, kpc: 0.58, kd: 0.015, tb: 40, tc: 60 }
+  };
+
   const maxPoints = 120;
   const histL = new Array(maxPoints).fill(0);
   const histR = new Array(maxPoints).fill(0);
   const histE = new Array(maxPoints).fill(0);
+
+  function fillProfileInputs(mode) {
+    const p = cfgCache[mode] || cfgCache.pits;
+    document.getElementById('inVelR').value = p.vr;
+    document.getElementById('inVelC').value = p.vc;
+    document.getElementById('inKFreno').value = p.kf;
+    document.getElementById('inKpBase').value = Number(p.kpb).toFixed(2);
+    document.getElementById('inKpCurva').value = Number(p.kpc).toFixed(2);
+    document.getElementById('inKd').value = Number(p.kd).toFixed(3);
+    const inTurb = document.getElementById('inTurb');
+    inTurb.min = (mode === 'comp') ? '20' : '0';
+    inTurb.value = p.tb;
+    document.getElementById('inTurbC').value = p.tc;
+  }
+
+  function onProfileChange() {
+    fillProfileInputs(document.getElementById('selProfile').value);
+  }
+
+  async function loadConfig() {
+    try {
+      const res = await fetch('/api/config', { cache: 'no-store' });
+      if (!res.ok) return;
+      const c = await res.json();
+      if (c.pits) cfgCache.pits = c.pits;
+      if (c.comp) cfgCache.comp = c.comp;
+      fillProfileInputs(document.getElementById('selProfile').value);
+      configLoaded = true;
+    } catch (e) {}
+  }
 
   function updateGauge(arcId, txtId, val) {
     document.getElementById(txtId).textContent = val;
@@ -279,8 +332,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const d = await res.json();
 
+      if (!configLoaded && d.vR !== undefined) {
+        cfgCache.pits = {
+          vr: d.vR, vc: d.vC, kf: d.kF, kpb: d.kpB, kpc: d.kpC, kd: d.kd, tb: d.tB, tc: d.tC
+        };
+        loadConfig();
+      }
+
       document.getElementById('connDot').className = 'dot online';
-      document.getElementById('connText').textContent = 'Conectado a ESP32-C3 (Wi-Fi Telemetría Activa)';
+      document.getElementById('connText').textContent = `Conectado a ESP32-C3 (Lazo ${d.dt || 12} ms / NVS Activo)`;
 
       running = d.run;
       const btnRun = document.getElementById('btnRun');
@@ -292,7 +352,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       btnTurb.textContent = turbOn ? `Turbina: ON (${d.turb}%)` : 'Turbina: OFF';
       btnTurb.className = turbOn ? 'active' : '';
 
-      document.getElementById('valMode').textContent = running ? 'AUTO (PID)' : 'MANUAL';
+      const dtLabel = (d.dt || 12) + 'ms';
+      document.getElementById('valMode').textContent = running ? `AUTO ${dtLabel}` : `PITS ${dtLabel}`;
       document.getElementById('valError').textContent = d.err;
 
       updateGauge('arcL', 'txtMotL', d.mL);
@@ -327,19 +388,45 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   async function toggleTurb() {
-    if (!turbOn) await applyPID();
+    if (!turbOn && document.getElementById('selProfile').value === 'pits') {
+      await applyPID();
+    }
     await sendCmd(turbOn ? 'turb_off' : 'turb_on');
   }
 
   async function applyPID() {
-    const spd  = document.getElementById('inSpeed').value;
-    const turb = document.getElementById('inTurb').value;
-    const kp   = document.getElementById('inKp').value;
-    const ki   = document.getElementById('inKi').value;
+    const mode = document.getElementById('selProfile').value;
+    const vr   = document.getElementById('inVelR').value;
+    const vc   = document.getElementById('inVelC').value;
+    const kf   = document.getElementById('inKFreno').value;
+    const kpb  = document.getElementById('inKpBase').value;
+    const kpc  = document.getElementById('inKpCurva').value;
     const kd   = document.getElementById('inKd').value;
-    await fetch(`/api/pid?spd=${spd}&turb=${turb}&kp=${kp}&ki=${ki}&kd=${kd}`);
+    const tb   = document.getElementById('inTurb').value;
+    const tc   = document.getElementById('inTurbC').value;
+
+    const url = `/api/pid?mode=${mode}&vr=${vr}&vc=${vc}&kf=${kf}&kpb=${kpb}&kpc=${kpc}&kd=${kd}&tb=${tb}&tc=${tc}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      await loadConfig();
+      const btn = document.getElementById('btnApply');
+      btn.textContent = 'Guardado NVS';
+      btn.className = 'active';
+      setTimeout(() => {
+        btn.textContent = 'Aplicar PID';
+        btn.className = 'primary';
+      }, 1200);
+    }
   }
 
+  async function resetPID() {
+    const res = await fetch('/api/pid?reset=1');
+    if (res.ok) {
+      await loadConfig();
+    }
+  }
+
+  loadConfig();
   pollData();
 </script>
 </body>
