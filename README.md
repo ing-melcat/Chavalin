@@ -1,74 +1,91 @@
-# Seguidor de Línea Pro v1 (ESP32-C3 + 16 Sensores + Telemetría Wi-Fi)
+# Seguidor de Línea Pro v1 (ESP32-C3 + 16 Sensores + EDF 2S)
 
-Proyecto de robot seguidor de línea de 16 sensores basado en **ESP32-C3 SuperMini**, multiplexor analógico **CD74HC4067**, dos barras de sensores **QTR-8A** (versión china) y driver de motores **TB6612FNG**, con panel de control y telemetría en tiempo real por Wi-Fi.
+Proyecto de robot seguidor de línea velocista de 16 sensores basado en **ESP32-C3 SuperMini**, multiplexor analógico **CD74HC4067**, dos barras de sensores **QTR-8A** (versión china) dispuestas en **V (22°)**, driver de motores **TB6612FNG**, motores **JSumo 12V 3600 RPM**, llantas de silicón **Ø20 mm** y turbina **EDF 30 mm 14000KV** con alimentación independiente **2S (7.4V)**.
+
+> **100% Libre de Wi-Fi / Bluetooth / RF:** Todo el proyecto opera de forma autónoma para cumplir el reglamento **RoboTiger Velocista Pro**. La calibración en banco y el ajuste fino de parámetros se realizan por **USB Serial (115200 baud)** con guardado automático en **Flash NVS (`Preferences`)**.
 
 ---
 
-## 1. Estructura del Proyecto
+## Estructura del Repositorio
 
 | Carpeta / Archivo | Descripción |
 | :--- | :--- |
-| `seguidor_web/seguidor_web.ino` | **Firmware principal activo**: lectura multiplexada de 16 sensores, control PID, manejo de motores TB6612 por LEDC (20 kHz), Access Point Wi-Fi y servidor HTTP nativo (`esp_http_server`). |
-| `seguidor_web/web_ui.h` | Interfaz web embebida (`HTML/CSS/JS`) servida en `http://192.168.4.1`: barras normalizadas (`I0` a `I15`), voltaje en vivo (`mV`), tacómetros de motores, osciloscopio de comandos/error y ajuste PID en caliente. |
-| `seguidor_pro/seguidor_pro.ino` | Versión anterior del seguidor sin servidor web. |
-| `test_diag/test_diag.ino` | Sketch de diagnóstico eléctrico: verifica cortos/atascos en `S0..S3` y `LED_ON`, saturación del ADC y estabilidad del pull-down. |
-| `test_sensores/`, `test_mux/`, `test_interactivo/` | Sketches auxiliares para pruebas puntuales de canales del multiplexor y lectura individual de sensores. |
-| `v1/` | Proyecto KiCad base (`v1.kicad_sch`, `v1.kicad_pcb`, `v1.kicad_pro`), respaldo del PCB y `freerouting-2.0.1.jar`. |
-| `v1_enrutado/` | PCB enrutado en KiCad (`v1_enrutado.kicad_pcb`), reporte DRC (`drc_report.json`) y vistas 3D (`vista_3d_top.png`, `vista_3d_bottom.png`). |
-| `GEMINI.md` | Memoria técnica con el mapeo de pines del esquemático y la solución de hardware para el ADC. |
+| `seguidor_pro/seguidor_pro.ino` | **Firmware único** de competencia (500 Hz exactos, `dt = 2 ms`), consola USB Serial de calibración/diagnóstico y persistencia NVS. |
+| `test_turbina_nano/` | Sketch auxiliar de prueba PWM para ESC de turbina en Arduino Nano. |
+| `v1/` | Esquemático y PCB base en KiCad (`v1.kicad_sch`, `v1.kicad_pcb`). |
+| `v1_enrutado/` | PCB enrutado y vistas 3D de referencia. |
 
 ---
 
-## 2. Hardware y Mapeo de Pines
+## Especificaciones de Hardware y Mapeo de Pines
 
-- **Microcontrolador:** ESP32-C3 SuperMini (`esp32:esp32:nologo_esp32c3_super_mini`, `CDCOnBoot=cdc`, puerto `COM5`)
-- **Driver de Motores (TB6612FNG):**
-  - `AI1` (Motor Izquierdo) → **GPIO 1**
-  - `AI2` (Motor Izquierdo) → **GPIO 2**
-  - `BI1` (Motor Derecho) → **GPIO 3**
-  - `BI2` (Motor Derecho) → **GPIO 8** *(comparte con LED azul de la placa)*
-  - `PWMA`, `PWMB`, `STBY` → **3.3V / VCC** *(habilitados por hardware; control PWM directo a 20 kHz, 8 bits sobre `AI1/AI2` y `BI1/BI2`)*
-  - `VM` → Batería 12V
-- **Multiplexor Analógico (CD74HC4067) y 16 Sensores (2× QTR-8A):**
-  - `SIG` / `COM` → **GPIO 0** (ADC)
-  - `S0` → **GPIO 6**
-  - `S1` → **GPIO 7**
-  - `S2` → **GPIO 10**
-  - `S3` → **GPIO 20**
-  - `EN` (`~E`) → **GND** *(siempre habilitado)*
-  - `LED_ON` (Emisores IR) → **GPIO 4** (`HIGH`)
-- **Orden Lógico y Visual de Sensores:**
-  - Izquierda → Derecha: **`I0`** (`CH00`, peso `-750`) hasta **`I15`** (`CH15`, peso `+750`).
-- **Pines libres recomendados para expansión (ej. ESC de turbina):**
-  - **`GPIO 5`** *(recomendado para señal PWM de 50 Hz; conectar también `GND` común y dejar el cable rojo `5V` del BEC desconectado/aislado si se alimenta por USB o regulador propio)*.
-  - `GPIO 21` (`TX`) disponible; `GPIO 9` disponible pero compartido con botón `BOOT`.
+- **Microcontrolador:** ESP32-C3 SuperMini (`esp32:esp32:nologo_esp32c3_super_mini`, `USB CDC On Boot = Enabled`).
+- **Tracción:** 2× motores **JSumo 12V 3600 RPM**, rines de aluminio **Ø12 × 33 mm** (eje 3 mm) + gomas de silicón **Ø20 × 28 mm** (`Ø externa = 20 mm`).
+- **Alimentación Principal (Tracción y Lógica):** LiPo **12V 750 mAh** directo a `VM` del TB6612 + regulador **step-down 12V→5V 3A** para alimentar el ESP32-C3.
+- **Sistema Aerodinámico (Independiente):** Turbina **EDF 30 mm 14000KV** (~224 gf / 2.20 N de empuje máx.) + **ESC 35A** alimentados por batería aparte **7.4V (2S) 450 mAh** (cable rojo BEC del ESC desconectado; **GND común** con la placa).
+
+| Subsistema | Señal / Función | Pin ESP32-C3 | Notas |
+| :--- | :--- | :--- | :--- |
+| **TB6612 (LEDC 20 kHz, 8 bits)** | `AI1` / `AI2` (Motor Izq A) | **GPIO 1**, **GPIO 2** | `PWMA`, `PWMB`, `STBY` fijos a `3.3V` |
+| **TB6612 (LEDC 20 kHz, 8 bits)** | `BI1` / `BI2` (Motor Der B) | **GPIO 3**, **GPIO 8** | `GPIO 8` comparte LED azul integrado |
+| **CD74HC4067 (Mux 16 ch)** | `SIG` / `COM` (Entrada ADC) | **GPIO 0** | Pull-down interno 45 kΩ forzado por registro |
+| **CD74HC4067 (Mux 16 ch)** | `S0`, `S1`, `S2`, `S3` | **GPIO 6, 7, 10, 20** | `EN` (`~E`) fijo a `GND` |
+| **Barras 2× QTR-8A (V 22°)** | `LED_ON` (Emisores IR) | **GPIO 4** | `HIGH` activo; `CH00..07` Barra 1, `CH08..15` Barra 2 |
+| **Turbina EDF (LEDC 50 Hz)** | Señal PWM ESC (1000–2000 µs) | **GPIO 5** | Resolución 14 bits; armado seguro en `1000 µs` (0%) |
+| **Arrancador Juez RRT** | Señal `GO` (`5V, GND, GO, RDY`) | **GPIO 21** | `INPUT_PULLDOWN`, antirrebote 3 lecturas a 500 Hz |
+| **Calibración en Pista** | Botón físico `BOOT_CAL` | **GPIO 9** | `INPUT_PULLUP` (botón `BOOT` integrado) |
 
 ---
 
-## 3. Soluciones Técnicas Implementadas
+## Detalles Críticos de Ingeniería
 
-1. **Anti-saturación del ADC del ESP32-C3 (`4095` fijo):**
-   - Con `ADC_11db`, el ADC del ESP32-C3 satura a `2922 mV`, mientras las barras QTR-8A chinas mantienen ~`3.0–3.3 V` en reposo.
-   - En `seguidor_web.ino` se registra primero el pin con `analogReadMilliVolts(PIN_SIG)` y después se fuerza el pull-down interno (~45 kΩ a GND) mediante `gpio_pullup_dis` + `gpio_pulldown_en`, bajando el voltaje en reposo a `~2480–2560 mV` dentro de la zona lineal.
-2. **Estabilidad Wi-Fi en ESP32-C3 SuperMini:**
-   - Access Point configurado en **Canal 8**, protocolo **802.11b/g** (`WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G`), potencia **`11 dBm`** y `WiFi.setSleep(false)`.
-   - Servidor HTTP implementado con **`esp_http_server.h`** (HTTP/1.1 Keep-Alive + `lru_purge_enable = true`), evitando el agotamiento de sockets `TIME_WAIT`/`FIN_WAIT_2`.
-3. **USB Serial no bloqueante:**
-   - `Serial.setTxTimeoutMs(0)` y verificación `Serial.availableForWrite() >= 100` para evitar pausas en `loop()` cuando no hay monitor serial conectado en `COM5`.
-4. **Calibración robusta:**
-   - `calibrarBase()` calcula el percentil 75 de la barra como referencia de blanco por si algún sensor está sobre la línea negra al arrancar, y `leerSensores()` auto-ajusta canales que inicien desconectados al recuperar voltaje normal (`>= 2450 mV`).
+1. **Anti-Saturación ADC en ESP32-C3 (`4095` Fijo):**
+   El ADC con `ADC_11db` satura a **`2922 mV`**, mientras que las barras QTR-8A chinas tienen pull-ups (~15 kΩ a 3.3V) que las dejan entre `3.0 V` y `3.3 V`. En Arduino ESP32 v3.x, `analogReadMilliVolts()` reconfigura el pin y borra `pinMode(..., INPUT_PULLDOWN)`. Por ello el código ejecuta en `setup()`:
+   - `analogReadMilliVolts(PIN_SIG);`
+   - `gpio_pullup_dis((gpio_num_t)PIN_SIG);`
+   - `gpio_pulldown_en((gpio_num_t)PIN_SIG);`
+   Esto forma un divisor de voltaje (~`2483 mV` en reposo) dentro de la zona lineal del ADC.
+
+2. **USB CDC No Bloqueante en Pista (`dt = 2 ms`):**
+   Sin laptop conectada, escribir al puerto serie en ESP32-C3 puede bloquear el lazo de 500 Hz. El firmware usa `Serial.setTxTimeoutMs(0)`, verificación previa `Serial.availableForWrite()` y **pausa la telemetría periódica automáticamente durante la carrera**.
+
+3. **Constantes Calibradas por Simulación Física (JSumo 3600 RPM + Ø20 mm + EDF 2S, 7/7 Escenarios):**
+   Valores por defecto cargados cuando NVS está vacío (o al ejecutar `reset`):
+   - `vr = 95` (velocidad recta), `vc = 58` (velocidad mínima en curva), `kf = 175` (freno en curva), `K_FRENO_DYN = 3.0`, `BRAKE_CAP = -195.0`, `MAX_PID = 175.0`.
+   - `kpb = 0.34`, `kpc = 0.56` (ganancia cuadrática), `kd = 0.014` (`Kd_step = 7.00` a 2 ms, `ALPHA_D = 0.20`).
+   - `tb = 50%` (recta), `tc = 80%` (curva cerrada), rampa de entrada 200 ms, decaimiento 160 ms (limitado a `[20%, 100%]` para no apagar la turbina en carrera).
 
 ---
 
-## 4. Compilación y Uso
+## Compilación y Carga
 
-### Subir firmware (`arduino-cli` o Arduino IDE)
-- **Placa:** `nologo_esp32c3_super_mini`
-- **FQBN:** `esp32:esp32:nologo_esp32c3_super_mini:CDCOnBoot=cdc`
-- **Archivo a abrir:** `seguidor_web/seguidor_web.ino` (carga automáticamente `web_ui.h`)
+- **Placa en Arduino IDE:** `NOLOGO ESP32C3 Super Mini` (`esp32:esp32:nologo_esp32c3_super_mini`)
+- **USB CDC On Boot:** `Enabled` (`CDCOnBoot=cdc`)
+- **Puerto:** `COM5` (o el COM asignado al conectar por USB-C)
+- **Archivo único a abrir:** `seguidor_pro/seguidor_pro.ino`
 
-### Panel de Telemetría Web
-1. Conéctate a la red Wi-Fi **`SeguidorPro-WiFi`** (contraseña: **`12345678`**).
-2. Abre **`http://192.168.4.1`** en el navegador.
-3. Coloca los sensores sobre la pista (blanco/fondo uniforme) y presiona **`Calibrar Sensores`**.
-4. Ajusta `Base Speed`, `Kp`, `Ki`, `Kd` con **`Aplicar PID`** y usa **`Arrancar Seguidor`**, **`Test Motores`** o **`PARO (E-STOP)`**.
+---
+
+## Calibración y Ajuste Fino por USB Serial (`115200 baud`)
+
+Al conectar el robot a la PC (Monitor Serial a **115200**, funciona con `"Nueva línea"` o `"Sin ajuste de línea"`), dispones de consola interactiva sin recompilar:
+
+| Comando | Acción |
+| :--- | :--- |
+| `c` | Autocalibra la base de los 16 sensores (percentil 75, ~1.2 s). Equivalente en pista al botón **`BOOT` (GPIO 9)**. |
+| `v` | Activa / pausa la telemetría en vivo cada 250 ms (`S:[########|........] Err:+000 Turb: 0% GO:0`). |
+| `t` (o `m`) | Test completo de motores (cuenta regresiva 3 s: A adelante, B adelante, ambos, reversa, giro en eje). |
+| `1` / `2` | Prueba rápida 1 s solo Motor A (Izq) o Motor B (Der). |
+| `u` | Prueba segura de turbina EDF al **25% durante 1.5 s** (sujetar robot; desconectar en `0%`). |
+| `l` | Activa / desactiva el seguidor en banco (500 Hz + turbina). **Usar con el robot levantado o en pista controlada.** |
+| `s` | **PARO DE EMERGENCIA inmediato** (detiene motores y apaga turbina al 0%, incluso en medio de una prueba o señal `GO`). |
+| `p` o `?` | Muestra los parámetros actuales guardados en Flash NVS y el resumen de comandos. |
+| `vr=95`, `vc=58`, `kf=175` | Ajusta velocidades / freno y guarda automáticamente en **Flash NVS**. |
+| `kpb=0.34`, `kpc=0.56`, `kd=0.014` | Ajusta ganancias del PID dinámico y guarda automáticamente en **Flash NVS**. |
+| `tb=50`, `tc=80` | Ajusta potencia base/curva de la turbina EDF (`20%..100%`) y guarda en **Flash NVS**. |
+| `reset` | Restaura todas las constantes calibradas por defecto (`3600 RPM / Ø20 mm`) en Flash NVS. |
+
+### Secuencia en Pista (Competencia)
+1. Encender baterías (ESP32 arma el ESC de la turbina a `1000 µs` en `1 s` y realiza una autocalibración inicial).
+2. Colocar el robot sobre el fondo de la pista y presionar **`BOOT` (GPIO 9)** si se requiere recalibrar la luz del coliseo (toma ~1.2 s, dentro de los 15 s previos).
+3. Conectar o esperar señal positiva **`GO` (`GPIO 21`)** del módulo arrancador RRT del juez: el robot arranca en el lazo determinista de 500 Hz con turbina encendida y se detiene con freno activo cuando `GO` vuelve a `LOW`.

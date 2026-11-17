@@ -3,22 +3,25 @@
   PROYECTO: SEGUIDOR DE LINEA PRO v1 - FIRMWARE DEFINITIVO DE COMPETENCIA
   =============================================================================
   Reglamento RoboTiger Velocista Pro - 100% Autónomo (CERO Wi-Fi / Radio / BT)
+  Calibración y tuning en banco por USB Serial (115200) guardado en Flash NVS.
   Lazo de Control PID Dinámico: 500 Hz exactos (dt = 2 ms = 2000 us)
 
-  Hardware (v1.kicad_sch):
+  Hardware (v1.kicad_sch + especificaciones reales):
     Microcontrolador: ESP32-C3 SuperMini (USB CDC On Boot = Enabled)
+    Motores y Ruedas: 2x JSumo 12V 3600 RPM, rin aluminio Ø12 + goma silicón Ø20 mm
+    Alimentación Motores: LiPo 12V 750 mAh -> TB6612 VM (Step-down 12V->5V 3A a ESP32)
     Driver TB6612 (LEDC 20 kHz, 8 bits):
       - AI1 -> GPIO 1 (Motor Izq / A)
       - AI2 -> GPIO 2 (Motor Izq / A)
       - BI1 -> GPIO 3 (Motor Der / B)
       - BI2 -> GPIO 8 (Motor Der / B - comparte LED azul integrado)
       - PWMA, PWMB, STBY -> 3.3V / VCC (fijos por hardware)
-    Multiplexor CD74HC4067 + 2x QTR-8A (16 canales, I0 Izq .. I15 Der):
+    Multiplexor CD74HC4067 + 2x QTR-8A en V 22° (16 canales, I0 Izq .. I15 Der):
       - SIG (COM) -> GPIO 0 (ADC con pull-down 45k por hardware anti-saturación)
       - S0..S3    -> GPIO 6, 7, 10, 20
       - LED_ON    -> GPIO 4 (HIGH)
-    Turbina EDF Brushless ESC (LEDC 50 Hz, 14 bits, 1000..2000 us):
-      - PWM_TURB  -> GPIO 5
+    Turbina EDF 30 mm 14000KV + ESC 35A + Batería aparte 7.4V (2S) 450 mAh:
+      - PWM_TURB  -> GPIO 5 (LEDC 50 Hz, 14 bits, 1000..2000 us; cable rojo BEC desconectado)
     Módulo Arrancador del Juez (RRT: 5V, GND, GO, RDY):
       - GO        -> GPIO 21 (INPUT_PULLDOWN, antirrebote 3 lecturas HIGH)
     Botón Físico de Calibración en Pista (< 15 s):
@@ -27,7 +30,10 @@
 */
 
 #include <Arduino.h>
+#include <Preferences.h>
+#include <ctype.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "driver/gpio.h"
 
@@ -63,29 +69,44 @@ const int16_t PESOS_V[16] = {
     62,  154,  249,  347,  447,  548,  649,  750
 };
 
-// --- CONSTANTES CALIBRADAS POR SIMULACIÓN PARA 500 Hz (dt = 2 ms, Wi-Fi OFF) ---
-const uint32_t LOOP_PERIOD_US    = 2000UL;
-const float    DT_S              = 0.002f;
+// --- CONSTANTES CALIBRADAS POR SIMULACIÓN 7/7 PARA 500 Hz (dt = 2 ms, CERO Wi-Fi) ---
+const uint32_t LOOP_PERIOD_US       = 2000UL;
+const float    DT_S                 = 0.002f;
 
-const int      VEL_RECTA         = 150;
-const int      VEL_CURVA_MIN     = 68;
-const int      K_FRENO           = 195;
-const float    K_FRENO_DYN       = 3.0f;
-const float    BRAKE_CAP         = -200.0f;
-const float    TAU_SLOW          = 0.13f;
-const float    ALPHA_SLOW        = DT_S / (TAU_SLOW + DT_S); // ~0.01515f @ 2 ms
+const int      DEFAULT_VEL_RECTA    = 95;
+const int      DEFAULT_VEL_CURVA_MIN = 58;
+const int      DEFAULT_K_FRENO      = 175;
+const float    K_FRENO_DYN          = 3.0f;
+const float    BRAKE_CAP            = -195.0f;
+const float    TAU_SLOW             = 0.13f;
+const float    ALPHA_SLOW           = DT_S / (TAU_SLOW + DT_S); // ~0.01515f @ 2 ms
 
-const float    MAX_PID           = 160.0f;
-const float    KP_BASE           = 0.34f;
-const float    KP_CURVA          = 0.58f;
-const float    KD_PHYS           = 0.015f;                   // Equiv. discreto Kd_step = 7.50f @ 2 ms
-const float    TAU_D             = 0.008f;
-const float    ALPHA_D           = DT_S / (TAU_D + DT_S);    // 0.20f @ 2 ms
+const float    MAX_PID              = 175.0f;
+const float    DEFAULT_KP_BASE      = 0.34f;
+const float    DEFAULT_KP_CURVA     = 0.56f;
+const float    DEFAULT_KD_PHYS      = 0.014f;                   // Equiv. discreto Kd_step = 7.00f @ 2 ms
+const float    TAU_D                = 0.008f;
+const float    ALPHA_D              = DT_S / (TAU_D + DT_S);    // 0.20f @ 2 ms
 
-const int      TURBINA_BASE_PCT  = 40;
-const int      TURBINA_CURVA_PCT = 60;
-const float    TAU_TURB_DECAY    = 0.16f;
-const float    TURB_RAMPA_S      = 0.20f;                    // Rampa suave al activar (0% -> 40% en 200 ms)
+const int      DEFAULT_TURB_BASE_PCT  = 50;
+const int      DEFAULT_TURB_CURVA_PCT = 80;
+const float    TAU_TURB_DECAY         = 0.16f;
+const float    TURB_RAMPA_S           = 0.20f;                  // Rampa suave al activar (0% -> tb en 200 ms)
+
+struct ConfigPID {
+  int   vel_recta;
+  int   vel_curva_min;
+  int   k_freno;
+  float kp_base;
+  float kp_curva;
+  float kd_phys;
+  int   turb_base_pct;
+  int   turb_curva_pct;
+};
+
+ConfigPID cfg;
+Preferences prefs;
+bool telemetria_serial = true;
 
 // --- CALIBRACIÓN Y NORMALIZACIÓN DE SENSORES ---
 const int RANGO_MAX_MV = 450;
@@ -140,6 +161,82 @@ void serialWriteNB(const char* text) {
   if (Serial.availableForWrite() >= (int)len) {
     Serial.write((const uint8_t*)text, len);
   }
+}
+
+// -----------------------------------------------------------------------------
+// PERSISTENCIA NVS FLASH (PREFERENCES) Y MONITOR DE PARÁMETROS
+// -----------------------------------------------------------------------------
+void normalizarConfig() {
+  cfg.vel_recta      = constrain(cfg.vel_recta, 30, 255);
+  cfg.vel_curva_min  = constrain(cfg.vel_curva_min, 0, 220);
+  cfg.k_freno        = constrain(cfg.k_freno, 0, 400);
+  cfg.kp_base        = clampf(cfg.kp_base, 0.05f, 2.0f);
+  cfg.kp_curva       = clampf(cfg.kp_curva, 0.0f, 3.0f);
+  cfg.kd_phys        = clampf(cfg.kd_phys, 0.0f, 0.10f);
+  cfg.turb_base_pct  = constrain(cfg.turb_base_pct, 20, 100);
+  cfg.turb_curva_pct = constrain(cfg.turb_curva_pct, 20, 100);
+}
+
+void restaurarDefaultsConfig() {
+  cfg.vel_recta      = DEFAULT_VEL_RECTA;
+  cfg.vel_curva_min  = DEFAULT_VEL_CURVA_MIN;
+  cfg.k_freno        = DEFAULT_K_FRENO;
+  cfg.kp_base        = DEFAULT_KP_BASE;
+  cfg.kp_curva       = DEFAULT_KP_CURVA;
+  cfg.kd_phys        = DEFAULT_KD_PHYS;
+  cfg.turb_base_pct  = DEFAULT_TURB_BASE_PCT;
+  cfg.turb_curva_pct = DEFAULT_TURB_CURVA_PCT;
+}
+
+void guardarConfigNVS() {
+  normalizarConfig();
+  if (!prefs.begin("chavalin", false)) {
+    serialWriteNB("[!] Error abriendo NVS para escritura.\n");
+    return;
+  }
+  prefs.putInt("vr", cfg.vel_recta);
+  prefs.putInt("vc", cfg.vel_curva_min);
+  prefs.putInt("kf", cfg.k_freno);
+  prefs.putFloat("kpb", cfg.kp_base);
+  prefs.putFloat("kpc", cfg.kp_curva);
+  prefs.putFloat("kd", cfg.kd_phys);
+  prefs.putInt("tb", cfg.turb_base_pct);
+  prefs.putInt("tc", cfg.turb_curva_pct);
+  prefs.end();
+}
+
+void cargarConfigNVS() {
+  if (!prefs.begin("chavalin", true)) {
+    restaurarDefaultsConfig();
+    guardarConfigNVS();
+    return;
+  }
+  cfg.vel_recta      = prefs.getInt("vr", DEFAULT_VEL_RECTA);
+  cfg.vel_curva_min  = prefs.getInt("vc", DEFAULT_VEL_CURVA_MIN);
+  cfg.k_freno        = prefs.getInt("kf", DEFAULT_K_FRENO);
+  cfg.kp_base        = prefs.getFloat("kpb", DEFAULT_KP_BASE);
+  cfg.kp_curva       = prefs.getFloat("kpc", DEFAULT_KP_CURVA);
+  cfg.kd_phys        = prefs.getFloat("kd", DEFAULT_KD_PHYS);
+  cfg.turb_base_pct  = prefs.getInt("tb", DEFAULT_TURB_BASE_PCT);
+  cfg.turb_curva_pct = prefs.getInt("tc", DEFAULT_TURB_CURVA_PCT);
+  prefs.end();
+  normalizarConfig();
+}
+
+void imprimirConfigSerial() {
+  char l1[96];
+  char l2[96];
+  snprintf(l1, sizeof(l1),
+           ">> [NVS] vr=%d vc=%d kf=%d | tb=%d%% tc=%d%%\n",
+           cfg.vel_recta, cfg.vel_curva_min, cfg.k_freno,
+           cfg.turb_base_pct, cfg.turb_curva_pct);
+  snprintf(l2, sizeof(l2),
+           ">> [PID] kpb=%.3f kpc=%.3f kd=%.4f (Kd_step=%.2f)\n",
+           cfg.kp_base, cfg.kp_curva, cfg.kd_phys, cfg.kd_phys / DT_S);
+  serialWriteNB(l1);
+  serialWriteNB(l2);
+  serialWriteNB("   Cmds: c(cal) v(stream) t(mot) u(turb) l(run) s(alto) p(cfg) reset\n");
+  serialWriteNB("   Edit: vr= vc= kf= kpb= kpc= kd= tb= tc= (guarda auto en NVS)\n");
 }
 
 // -----------------------------------------------------------------------------
@@ -393,18 +490,18 @@ void detenerBanco() {
 void ejecutarControlPID500Hz() {
   // 1. Ganancia cuadrática y D filtrada invariante a dt_s (tau_d = 0.008 s)
   float u_err = fminf(1.0f, fabsf(error_actual) / 750.0f);
-  float kp_din = KP_BASE + KP_CURVA * (u_err * u_err);
+  float kp_din = cfg.kp_base + cfg.kp_curva * (u_err * u_err);
   float de_dt = (error_actual - error_anterior) / DT_S;
   d_filt = ALPHA_D * de_dt + (1.0f - ALPHA_D) * d_filt;
 
-  float pid_raw = kp_din * error_actual + KD_PHYS * d_filt;
+  float pid_raw = kp_din * error_actual + cfg.kd_phys * d_filt;
   float salida_pid = clampf(pid_raw, -MAX_PID, MAX_PID);
 
   // 2. Freno predictivo en entrada brusca a horquilla (tau_slow = 0.13 s)
   u_slow += ALPHA_SLOW * (u_err - u_slow);
   float u_jump = fmaxf(0.0f, u_err - u_slow);
-  float vel_base = fmaxf((float)VEL_CURVA_MIN, (float)VEL_RECTA - (float)K_FRENO * u_err);
-  float vel_din = fmaxf(BRAKE_CAP, vel_base - K_FRENO_DYN * (float)K_FRENO * u_jump);
+  float vel_base = fmaxf((float)cfg.vel_curva_min, (float)cfg.vel_recta - (float)cfg.k_freno * u_err);
+  float vel_din = fmaxf(BRAKE_CAP, vel_base - K_FRENO_DYN * (float)cfg.k_freno * u_jump);
 
   // 3. Mezcla diferencial TB6612 (Motor A Izq +pid, Motor B Der -pid)
   int pwm_A = constrain((int)lroundf(vel_din + salida_pid), -255, 255);
@@ -412,11 +509,11 @@ void ejecutarControlPID500Hz() {
   setMotors(pwm_A, pwm_B);
 
   // 4. Turbina EDF siempre activa durante la carrera:
-  //    Rampa suave al activar (0 -> TURBINA_BASE_PCT en 200 ms),
+  //    Rampa suave al activar (0 -> tb en 200 ms),
   //    luego ataque inmediato al subir y decaimiento exponencial de 160 ms al salir de curva.
-  float turb_tgt = (float)TURBINA_BASE_PCT + (float)(TURBINA_CURVA_PCT - TURBINA_BASE_PCT) * u_err;
+  float turb_tgt = (float)cfg.turb_base_pct + (float)(cfg.turb_curva_pct - cfg.turb_base_pct) * u_err;
   if (!turbina_rampa_done) {
-    turb_cmd += (float)TURBINA_BASE_PCT * (DT_S / TURB_RAMPA_S);
+    turb_cmd += (float)cfg.turb_base_pct * (DT_S / TURB_RAMPA_S);
     if (turb_cmd >= turb_tgt) {
       turb_cmd = turb_tgt;
       turbina_rampa_done = true;
@@ -476,46 +573,209 @@ void ejecutarTestMotores() {
   last_loop_us = micros();
 }
 
-void procesarSerial() {
-  while (Serial.available() > 0) {
-    char cmd = (char)Serial.read();
-    if (cmd == '\r' || cmd == '\n' || cmd == ' ') continue;
+void ejecutarTestTurbina() {
+  if (estado == COMPETENCIA_ACTIVA) return;
+  detenerBanco();
+  serialWriteNB(">> [TEST TURBINA] Prueba segura 25% por 1.5 s (sujetar robot)...\n");
+  for (int pct = 5; pct <= 25; pct += 5) {
+    setTurbina((float)pct);
+    delay(40);
+  }
+  delay(1300);
+  setTurbina(0.0f);
+  serialWriteNB(">> [TEST TURBINA] Turbina detenida (0%).\n");
+  last_loop_us = micros();
+}
 
-    if (cmd == 's' || cmd == 'S') {
+void ejecutarComandoSerial(const char* raw) {
+  char clean[48];
+  const char* p = raw;
+  while (*p == ' ' || *p == '\t') p++;
+  size_t len = strlen(p);
+  while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+  if (len == 0) return;
+  if (len >= sizeof(clean)) len = sizeof(clean) - 1;
+  for (size_t i = 0; i < len; i++) {
+    clean[i] = (char)tolower((unsigned char)p[i]);
+  }
+  clean[len] = '\0';
+
+  if (len == 1) {
+    char cmd = clean[0];
+    if (cmd == 's') {
       if (digitalRead(PIN_GO) == HIGH) {
         go_bloqueado_hasta_low = true;
       }
       detenerBanco();
       serialWriteNB(">> [ALTO] Motores y turbina detenidos.\n");
-    } else if (estado == COMPETENCIA_ACTIVA) {
-      // En carrera por RRT no se aceptan comandos de banco salvo 's'
-      continue;
-    } else if (cmd == 't' || cmd == 'T' || cmd == 'm' || cmd == 'M') {
-      ejecutarTestMotores();
-    } else if (cmd == 'c' || cmd == 'C') {
-      calibrarBase();
-    } else if (cmd == 'l' || cmd == 'L') {
-      if (estado == BANCO_SEGUIDOR) {
-        detenerBanco();
-        serialWriteNB(">> [BANCO] Seguidor DESACTIVADO.\n");
-      } else {
-        iniciarCarrera(BANCO_SEGUIDOR);
-      }
-    } else if (cmd == '1') {
-      detenerBanco();
-      serialWriteNB(">> Motor A adelante 1s...\n");
-      setMotorA(120);
-      delay(1000);
-      stopMotors();
-      last_loop_us = micros();
-    } else if (cmd == '2') {
-      detenerBanco();
-      serialWriteNB(">> Motor B adelante 1s...\n");
-      setMotorB(120);
-      delay(1000);
-      stopMotors();
-      last_loop_us = micros();
+      return;
     }
+    if (estado == COMPETENCIA_ACTIVA) {
+      serialWriteNB("[!] En competencia RRT solo 's' esta permitido.\n");
+      return;
+    }
+    switch (cmd) {
+      case 'c':
+        calibrarBase();
+        break;
+      case 'v':
+        telemetria_serial = !telemetria_serial;
+        serialWriteNB(telemetria_serial
+                        ? ">> [STREAM] Telemetria 250 ms ACTIVADA.\n"
+                        : ">> [STREAM] Telemetria 250 ms PAUSADA ('v' reanuda).\n");
+        break;
+      case 't':
+      case 'm':
+        ejecutarTestMotores();
+        break;
+      case 'u':
+        ejecutarTestTurbina();
+        break;
+      case 'l':
+        if (estado == BANCO_SEGUIDOR) {
+          detenerBanco();
+          serialWriteNB(">> [BANCO] Seguidor DESACTIVADO.\n");
+        } else {
+          iniciarCarrera(BANCO_SEGUIDOR);
+        }
+        break;
+      case 'p':
+      case '?':
+        imprimirConfigSerial();
+        break;
+      case '1':
+        detenerBanco();
+        serialWriteNB(">> Motor A (Izq) adelante 1 s...\n");
+        setMotorA(120);
+        delay(1000);
+        stopMotors();
+        last_loop_us = micros();
+        break;
+      case '2':
+        detenerBanco();
+        serialWriteNB(">> Motor B (Der) adelante 1 s...\n");
+        setMotorB(120);
+        delay(1000);
+        stopMotors();
+        last_loop_us = micros();
+        break;
+      default:
+        serialWriteNB("[?] Comando desconocido. Envia '?' para ver ayuda.\n");
+        break;
+    }
+    return;
+  }
+
+  if (estado == COMPETENCIA_ACTIVA) {
+    serialWriteNB("[!] Ajuste bloqueado en competencia RRT.\n");
+    return;
+  }
+
+  if (strcmp(clean, "reset") == 0) {
+    restaurarDefaultsConfig();
+    guardarConfigNVS();
+    serialWriteNB(">> [NVS] Constantes restauradas a valores 3600 RPM por defecto.\n");
+    imprimirConfigSerial();
+    return;
+  }
+
+  char* eq = strchr(clean, '=');
+  if (!eq) {
+    serialWriteNB("[?] Formato invalido. Usa '?' o parametro=valor (ej. vr=100).\n");
+    return;
+  }
+
+  *eq = '\0';
+  char* key = clean;
+  size_t klen = strlen(key);
+  while (klen > 0 && (key[klen - 1] == ' ' || key[klen - 1] == '\t')) {
+    key[--klen] = '\0';
+  }
+  char* val = eq + 1;
+  while (*val == ' ' || *val == '\t') val++;
+  if (*key == '\0' || *val == '\0') {
+    serialWriteNB("[?] Falta clave o valor (ej. vr=95, kpb=0.34).\n");
+    return;
+  }
+
+  bool actualizado = true;
+  if (strcmp(key, "vr") == 0 || strcmp(key, "vc") == 0 ||
+      strcmp(key, "kf") == 0 || strcmp(key, "tb") == 0 || strcmp(key, "tc") == 0) {
+    char* endptr = nullptr;
+    long ival = strtol(val, &endptr, 10);
+    if (endptr == val || *endptr != '\0') {
+      serialWriteNB("[!] Valor entero invalido.\n");
+      return;
+    }
+    if (strcmp(key, "vr") == 0) cfg.vel_recta = (int)ival;
+    else if (strcmp(key, "vc") == 0) cfg.vel_curva_min = (int)ival;
+    else if (strcmp(key, "kf") == 0) cfg.k_freno = (int)ival;
+    else if (strcmp(key, "tb") == 0) cfg.turb_base_pct = (int)ival;
+    else cfg.turb_curva_pct = (int)ival;
+  } else if (strcmp(key, "kpb") == 0 || strcmp(key, "kpc") == 0 || strcmp(key, "kd") == 0) {
+    char* endptr = nullptr;
+    float fval = strtof(val, &endptr);
+    if (endptr == val || *endptr != '\0' || !isfinite(fval)) {
+      serialWriteNB("[!] Valor decimal invalido.\n");
+      return;
+    }
+    if (strcmp(key, "kpb") == 0) cfg.kp_base = fval;
+    else if (strcmp(key, "kpc") == 0) cfg.kp_curva = fval;
+    else cfg.kd_phys = fval;
+  } else {
+    actualizado = false;
+  }
+
+  if (!actualizado) {
+    serialWriteNB("[?] Clave desconocida. Validas: vr vc kf kpb kpc kd tb tc reset\n");
+    return;
+  }
+
+  guardarConfigNVS();
+  serialWriteNB(">> [NVS] Guardado en Flash.\n");
+  imprimirConfigSerial();
+}
+
+void procesarSerial() {
+  static char     cmd_buf[48];
+  static uint8_t  cmd_len = 0;
+  static uint32_t last_rx_ms = 0;
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    // Paro de emergencia instantaneo sin esperar salto de linea
+    if ((c == 's' || c == 'S') && (cmd_len == 0 || estado != DETENIDO)) {
+      cmd_len = 0;
+      if (digitalRead(PIN_GO) == HIGH) {
+        go_bloqueado_hasta_low = true;
+      }
+      detenerBanco();
+      serialWriteNB(">> [ALTO] Motores y turbina detenidos.\n");
+      continue;
+    }
+
+    if (c == '\r' || c == '\n') {
+      if (cmd_len > 0) {
+        cmd_buf[cmd_len] = '\0';
+        cmd_len = 0;
+        ejecutarComandoSerial(cmd_buf);
+      }
+    } else if (c == '\b' || c == 0x7F) {
+      if (cmd_len > 0) cmd_len--;
+    } else if ((uint8_t)c >= 32 && (uint8_t)c <= 126) {
+      if (cmd_len < sizeof(cmd_buf) - 1) {
+        cmd_buf[cmd_len++] = c;
+        last_rx_ms = millis();
+      }
+    }
+  }
+
+  // Permite comandos de 1 letra aun con Monitor Serial en "Sin ajuste de linea"
+  if (cmd_len > 0 && (millis() - last_rx_ms >= 35UL)) {
+    cmd_buf[cmd_len] = '\0';
+    cmd_len = 0;
+    ejecutarComandoSerial(cmd_buf);
   }
 }
 
@@ -598,14 +858,17 @@ void setup() {
   gpio_pullup_dis((gpio_num_t)PIN_SIG);
   gpio_pulldown_en((gpio_num_t)PIN_SIG);
 
-  // 6. Autocalibración inteligente inicial (percentil 75 ord[12])
+  // 6. Cargar parametros persistentes desde Flash NVS ("chavalin")
+  cargarConfigNVS();
+
+  // 7. Autocalibración inteligente inicial (percentil 75 ord[12])
   calibrarBase();
 
   serialWriteNB("====================================================\n");
-  serialWriteNB(" SEGUIDOR PRO v1 - COMPETENCIA 500 Hz (CERO WIFI)\n");
-  serialWriteNB(" Comandos: 't' test | 's' alto | 'c' cal | 'l' run\n");
+  serialWriteNB(" SEGUIDOR PRO v1 - 500 Hz SERIAL+NVS (CERO WIFI)\n");
   serialWriteNB(" Pista: BOOT(9) recalibra | RRT GO(21) inicia/para\n");
   serialWriteNB("====================================================\n");
+  imprimirConfigSerial();
 
   last_loop_us = micros();
 }
@@ -676,8 +939,8 @@ void loop() {
     error_anterior = error_actual;
   }
 
-  // Telemetría USB no bloqueante cada 250 ms únicamente cuando está detenido
-  if (estado == DETENIDO && (now_ms - ultimo_print_ms >= 250UL)) {
+  // Telemetría USB no bloqueante cada 250 ms cuando está detenido y activa ('v')
+  if (estado == DETENIDO && telemetria_serial && (now_ms - ultimo_print_ms >= 250UL)) {
     ultimo_print_ms = now_ms;
     imprimirTelemetriaSerialNB();
   }
