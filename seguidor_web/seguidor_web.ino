@@ -42,10 +42,10 @@ const uint8_t  PWM_RES  = 8;
 
 // --- PINES MULTIPLEXOR CD74HC4067 Y SENSORES ---
 #define PIN_SIG       0   // GPIO 0: ADC COM/SIG (con pull-down hardware anti-saturación)
-#define PIN_S0        6   // GPIO 6: S0
-#define PIN_S1        7   // GPIO 7: S1
-#define PIN_S2       10   // GPIO 10: S2
-#define PIN_S3       20   // GPIO 20: S3
+#define PIN_S0       20   // GPIO 20: S0 (orden físico invertido en placa/cableado)
+#define PIN_S1       10   // GPIO 10: S1
+#define PIN_S2        7   // GPIO 7:  S2
+#define PIN_S3        6   // GPIO 6:  S3
 #define PIN_LED_ON    4   // GPIO 4: Emisores IR
 
 // --- PIN TURBINA (ESC BRUSHLESS PWM 50 Hz, 14 bits) ---
@@ -57,10 +57,10 @@ const uint8_t  ESC_PWM_RES  = 14; // 0..16383 (~1.22 us por paso)
 #define PIN_GO       21   // GPIO 21: RRT GO (INPUT_PULLDOWN, HIGH = Competencia)
 #define PIN_BOOT_CAL  9   // GPIO 9:  Botón BOOT físico para calibrar en reposo
 
-// --- GEOMETRÍA EN V (L0=150mm, alpha=22 deg, s_inner=6.69mm -> @sim-math) ---
+// --- GEOMETRÍA EN V SIMÉTRICA 12 SENSORES ACTIVOS (I2=-750 .. I13=+750; I0,I1,I14,I15 enmascarados) ---
 const int16_t PESOS_V[16] = {
-  -750, -649, -548, -447, -347, -249, -154, -62,
-    62,  154,  249,  347,  447,  548,  649, 750
+     0,    0, -750, -610, -470, -330, -195,  -65,
+    65,  195,  330,  470,  610,  750,    0,    0
 };
 
 // --- CONSTANTES FÍSICAS DEL PID DINÁMICO (@sim-math) ---
@@ -104,8 +104,9 @@ portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t lecturas_mv[16];     // Orden lógico Left->Right: índice 0 = I0 (Izq) .. 15 = I15 (Der)
 uint16_t base_mv[16];
 uint16_t norm_s[16];          // Normalizado 0 a 1000 para centroide y UI web
-const int RANGO_MAX_MV = 450; // Rango de variación (mV) para escalar 0-1000
-const int UMBRAL_DELTA = 25;  // Umbral de detección de línea sobre blanco base
+bool     calibrado_en_blanco = false;
+const int RANGO_MAX_MV = 600; // Rango de variación (mV) para escalar 0-1000
+const int UMBRAL_DELTA = 35;  // Umbral de detección limpio sobre base individual
 
 inline uint8_t canalFisico(uint8_t pos_izq_der) {
   return pos_izq_der;
@@ -245,11 +246,31 @@ void apagarRadioWiFi() {
 
 void ejecutarTestMotores() {
   detenerTodo();
-  setMotors(110, 0);    delay(600);
-  setMotors(0, 110);    delay(600);
-  setMotors(100, 100);  delay(600);
+  Serial.println(">> [TEST MOTORES] Iniciando prueba (Izq, Der, Adelante, Reversa)...");
+  Serial.println(">> [TEST MOTORES] Motor IZQ adelante (+110, 600 ms)");
+  setMotors(110, 0);     delay(600);
+  Serial.println(">> [TEST MOTORES] Motor DER adelante (+110, 600 ms)");
+  setMotors(0, 110);     delay(600);
+  Serial.println(">> [TEST MOTORES] Ambos adelante (+100, 600 ms)");
+  setMotors(100, 100);   delay(600);
+  Serial.println(">> [TEST MOTORES] Ambos reversa (-100, 600 ms)");
   setMotors(-100, -100); delay(600);
   stopMotors();
+  Serial.println(">> [TEST MOTORES] Motores detenidos.");
+  lastLoopUs = micros();
+}
+
+void ejecutarTestTurbina() {
+  if (modo_competencia) return;
+  detenerTodo();
+  Serial.println(">> [TEST TURBINA] Prueba segura 25% (1250 us) por 1.5 s...");
+  for (int pct = 5; pct <= 25; pct += 5) {
+    setTurbina(pct);
+    delay(40);
+  }
+  delay(1300);
+  setTurbina(0);
+  Serial.println(">> [TEST TURBINA] Turbina detenida (0% / 1000 us).");
   lastLoopUs = micros();
 }
 
@@ -353,17 +374,23 @@ void leerSensores(bool modo_rapido_2ms) {
     }
     lecturas_mv[pos] = (uint16_t)(suma / muestras);
 
-    // Si un canal arrancó flotando (<300 mV) y ya entró en reposo normal, auto-ajustar base
-    if (base_mv[pos] < 300 && lecturas_mv[pos] >= 2450) {
+    // En modo aire, si un canal arrancó desconectado (<60 mV) y recupera reposo, auto-ajustar base
+    if (!calibrado_en_blanco && base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    int delta = abs((int)lecturas_mv[pos] - (int)base_mv[pos]);
-    if (delta < UMBRAL_DELTA) {
+    if (pos < 2 || pos > 13 || base_mv[pos] < 60) {
       norm_s[pos] = 0;
     } else {
-      long n = ((long)delta * 1000L) / RANGO_MAX_MV;
-      norm_s[pos] = (uint16_t)constrain(n, 0, 1000);
+      int delta = calibrado_en_blanco
+                    ? ((int)lecturas_mv[pos] - (int)base_mv[pos])
+                    : ((int)base_mv[pos] - (int)lecturas_mv[pos]);
+      if (delta < UMBRAL_DELTA) {
+        norm_s[pos] = 0;
+      } else {
+        long n = ((long)delta * 1000L) / RANGO_MAX_MV;
+        norm_s[pos] = (uint16_t)constrain(n, 0, 1000);
+      }
     }
   }
 }
@@ -385,38 +412,39 @@ void calibrarBase() {
     delay(4);
   }
 
-  uint16_t ord[16];
   for (int i = 0; i < 16; i++) {
     base_mv[i] = (uint16_t)(acum[i] / 16);
-    ord[i] = base_mv[i];
   }
 
-  // Percentil 75 como referencia de fondo blanco en caso de pisar línea al calibrar
-  for (int i = 0; i < 15; i++) {
-    for (int j = i + 1; j < 16; j++) {
+  // Mediana de los 12 sensores activos (I2..I13) para detectar fondo blanco vs aire
+  uint16_t ord[12];
+  for (int i = 0; i < 12; i++) ord[i] = base_mv[i + 2];
+  for (int i = 0; i < 11; i++) {
+    for (int j = i + 1; j < 12; j++) {
       if (ord[j] < ord[i]) {
         uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
       }
     }
   }
-  uint16_t ref_blanco = ord[12];
 
   int canales_bajos = 0;
-  for (int i = 0; i < 16; i++) {
-    if (ref_blanco > 2200 && base_mv[i] > 300 && base_mv[i] < (ref_blanco - 60)) {
-      base_mv[i] = ref_blanco;
-    }
-    if (base_mv[i] < 150) canales_bajos++;
+  for (int i = 2; i <= 13; i++) {
+    if (base_mv[i] < 60) canales_bajos++;
   }
 
+  // Conservamos la base individual de cada canal en ambos modos para compensar diferencias entre barras
+  calibrado_en_blanco = (ord[5] < 1000);
+
   if (Serial.availableForWrite() >= 64) {
+    Serial.printf("Modo Calibracion (12ch I2..I13): %s\n",
+                  calibrado_en_blanco ? "BLANCO (detecta linea negra)" : "AIRE (detecta papel blanco)");
     Serial.print("Base mV (I0 -> I15): ");
     for (int i = 0; i < 16; i++) {
       Serial.printf("I%d:%u ", i, base_mv[i]);
     }
     Serial.println();
-    if (canales_bajos == 16) {
-      Serial.println("[!] ALERTA HARDWARE: Todos los canales ~0 mV -> Revisar SIG (GPIO 0), EN a GND o 3.3V!");
+    if (canales_bajos == 12) {
+      Serial.println("[!] ALERTA HARDWARE: Canales activos ~0 mV -> Revisar SIG (GPIO 0), EN a GND o 3.3V!");
     }
   }
   lastLoopUs = micros();
@@ -887,21 +915,25 @@ void loop() {
     error_anterior = error_actual;
   }
 
-  // 4. Comandos rápidos por USB Serial ('s' paro, 'c' calibrar en reposo)
+  // 4. Comandos rápidos por USB Serial ('s' paro, 'c' calibrar, 'u' test turbina 25%, 'm' test motores)
   if (Serial.available()) {
     char ch = Serial.read();
-    if (ch == 's') {
+    if (ch == 's' || ch == 'S') {
       detenerTodo();
-    } else if (ch == 'c' && !seguidor_activo) {
+    } else if ((ch == 'c' || ch == 'C') && !seguidor_activo) {
       detenerTodo();
       calibrarBase();
+    } else if ((ch == 'u' || ch == 'U') && !seguidor_activo && !modo_competencia) {
+      ejecutarTestTurbina();
+    } else if ((ch == 'm' || ch == 'M') && !seguidor_activo && !modo_competencia) {
+      ejecutarTestMotores();
     }
   }
 
-  // 5. Telemetría periódica por USB Serial solo en reposo (no bloqueante)
+  // 5. Telemetría periódica por USB Serial solo en reposo (no bloqueante, ~6.7 Hz)
   static unsigned long lastSerialMs = 0;
   unsigned long nowMs = millis();
-  if (!seguidor_activo && (uint32_t)(nowMs - lastSerialMs) >= 1000UL) {
+  if (!seguidor_activo && (uint32_t)(nowMs - lastSerialMs) >= 150UL) {
     lastSerialMs = nowMs;
     if (Serial.availableForWrite() >= 100) {
       char sbuf[112];

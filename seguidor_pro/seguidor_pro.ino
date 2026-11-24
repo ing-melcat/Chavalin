@@ -18,7 +18,7 @@
       - PWMA, PWMB, STBY -> 3.3V / VCC (fijos por hardware)
     Multiplexor CD74HC4067 + 2x QTR-8A en V 22° (16 canales, I0 Izq .. I15 Der):
       - SIG (COM) -> GPIO 0 (ADC con pull-down 45k por hardware anti-saturación)
-      - S0..S3    -> GPIO 6, 7, 10, 20
+      - S0..S3    -> GPIO 20, 10, 7, 6 (S0=20, S1=10, S2=7, S3=6)
       - LED_ON    -> GPIO 4 (HIGH)
     Turbina EDF 30 mm 14000KV + ESC 35A + Batería aparte 7.4V (2S) 450 mAh:
       - PWM_TURB  -> GPIO 5 (LEDC 50 Hz, 14 bits, 1000..2000 us; cable rojo BEC desconectado)
@@ -48,10 +48,10 @@ const uint8_t  PWM_RES  = 8;
 
 // --- PINES DEL MULTIPLEXOR CD74HC4067 Y SENSORES IR ---
 #define PIN_SIG       0   // ADC (COM/SIG del CD74HC4067)
-#define PIN_S0        6   // Selector S0
-#define PIN_S1        7   // Selector S1
-#define PIN_S2       10   // Selector S2
-#define PIN_S3       20   // Selector S3
+#define PIN_S0       20   // Selector S0
+#define PIN_S1       10   // Selector S1
+#define PIN_S2        7   // Selector S2
+#define PIN_S3        6   // Selector S3
 #define PIN_LED_ON    4   // Emisores IR
 
 // --- PIN TURBINA EDF (ESC PWM 50 Hz, 14 bits) ---
@@ -63,10 +63,10 @@ const uint8_t  ESC_PWM_RES  = 14; // 0..16383 (~1.22 us/paso)
 #define PIN_GO        21  // Señal GO del módulo RRT (INPUT_PULLDOWN)
 #define PIN_BOOT_CAL   9  // Botón BOOT integrado ESP32-C3 (INPUT_PULLUP)
 
-// --- GEOMETRÍA EN V (L0=150 mm, alpha=22 deg, I0=-750 Izq .. I15=+750 Der) ---
+// --- GEOMETRÍA EN V SIMÉTRICA 12 SENSORES ACTIVOS (I2=-750 .. I13=+750; I0,I1,I14,I15 enmascarados) ---
 const int16_t PESOS_V[16] = {
-  -750, -649, -548, -447, -347, -249, -154, -62,
-    62,  154,  249,  347,  447,  548,  649,  750
+     0,    0, -750, -610, -470, -330, -195,  -65,
+    65,  195,  330,  470,  610,  750,    0,    0
 };
 
 // --- CONSTANTES CALIBRADAS POR SIMULACIÓN 7/7 PARA 500 Hz (dt = 2 ms, CERO Wi-Fi) ---
@@ -109,12 +109,13 @@ Preferences prefs;
 bool telemetria_serial = true;
 
 // --- CALIBRACIÓN Y NORMALIZACIÓN DE SENSORES ---
-const int RANGO_MAX_MV = 450;
-const int UMBRAL_DELTA = 25;
+const int RANGO_MAX_MV = 600;
+const int UMBRAL_DELTA = 35;
 
 uint16_t lecturas_mv[16];
 uint16_t base_mv[16];
 uint16_t norm_s[16];
+bool     calibrado_en_blanco = false;
 
 // --- ESTADO DEL ROBOT Y LAZO DE CONTROL ---
 enum EstadoRobot {
@@ -323,15 +324,17 @@ void leerSensores() {
     suma += analogReadMilliVolts(PIN_SIG);
     lecturas_mv[pos] = (uint16_t)(suma / 2);
 
-    // Auto-ajuste si el canal arrancó desconectado (<300 mV) y luego entra en reposo (>=2450 mV)
-    if (base_mv[pos] < 300 && lecturas_mv[pos] >= 2450) {
+    // En modo aire, si un canal arrancó desconectado (<60 mV) y recupera reposo, auto-ajustar base
+    if (!calibrado_en_blanco && base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    if (base_mv[pos] < 300) {
+    if (pos < 2 || pos > 13 || base_mv[pos] < 60) {
       norm_s[pos] = 0;
     } else {
-      int delta = abs((int)lecturas_mv[pos] - (int)base_mv[pos]);
+      int delta = calibrado_en_blanco
+                    ? ((int)lecturas_mv[pos] - (int)base_mv[pos])
+                    : ((int)base_mv[pos] - (int)lecturas_mv[pos]);
       if (delta < UMBRAL_DELTA) {
         norm_s[pos] = 0;
       } else {
@@ -364,15 +367,15 @@ void calibrarBase() {
     delay(4);
   }
 
-  uint16_t ord[16];
   for (int i = 0; i < 16; i++) {
     base_mv[i] = (uint16_t)(acum[i] / 16);
-    ord[i] = base_mv[i];
   }
 
-  // Ordenar ascendente para obtener el percentil 75 (ord[12]) como referencia de blanco
-  for (int i = 0; i < 15; i++) {
-    for (int j = i + 1; j < 16; j++) {
+  // Mediana de los 12 sensores activos (I2..I13) para detectar pista blanca vs aire
+  uint16_t ord[12];
+  for (int i = 0; i < 12; i++) ord[i] = base_mv[i + 2];
+  for (int i = 0; i < 11; i++) {
+    for (int j = i + 1; j < 12; j++) {
       if (ord[j] < ord[i]) {
         uint16_t tmp = ord[i];
         ord[i] = ord[j];
@@ -380,16 +383,17 @@ void calibrarBase() {
       }
     }
   }
-  uint16_t ref_blanco = ord[12];
 
   int canales_bajos = 0;
-  for (int i = 0; i < 16; i++) {
-    // Si la barra está alimentada y algún sensor pisaba la línea negra, corregir al blanco
-    if (ref_blanco > 2200 && base_mv[i] > 300 && base_mv[i] < (ref_blanco - 60)) {
-      base_mv[i] = ref_blanco;
-    }
-    if (base_mv[i] < 150) canales_bajos++;
+  for (int i = 2; i <= 13; i++) {
+    if (base_mv[i] < 60) canales_bajos++;
   }
+
+  calibrado_en_blanco = (ord[5] < 1000);
+  uint16_t ref_info = ord[5];
+  serialWriteNB(calibrado_en_blanco
+                  ? ">> Modo: PISTA BLANCA 12ch (detecta linea negra).\n"
+                  : ">> Modo: AIRE 12ch (detecta papel blanco).\n");
 
   // Reportar calibración por USB en líneas cortas no bloqueantes
   char buf[96];
@@ -403,7 +407,7 @@ void calibrarBase() {
   int n2 = snprintf(buf, sizeof(buf),
                     "Base I8..15: %4u %4u %4u %4u %4u %4u %4u %4u (ref=%u)\n",
                     base_mv[8], base_mv[9], base_mv[10], base_mv[11],
-                    base_mv[12], base_mv[13], base_mv[14], base_mv[15], ref_blanco);
+                    base_mv[12], base_mv[13], base_mv[14], base_mv[15], ref_info);
   if (n2 > 0 && Serial.availableForWrite() >= n2) {
     Serial.write((const uint8_t*)buf, n2);
   }

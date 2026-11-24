@@ -18,10 +18,10 @@
 #include "driver/gpio.h"
 
 #define PIN_SIG      0   // GPIO0: Entrada analógica conectada a SIG (COM) del Mux
-#define PIN_S0       6   // GPIO6: Selector S0
-#define PIN_S1       7   // GPIO7: Selector S1
-#define PIN_S2      10   // GPIO10: Selector S2
-#define PIN_S3      20   // GPIO20: Selector S3
+#define PIN_S0      20   // GPIO20: Selector S0
+#define PIN_S1      10   // GPIO10: Selector S1
+#define PIN_S2       7   // GPIO7: Selector S2
+#define PIN_S3       6   // GPIO6: Selector S3
 #define PIN_LED_ON   4   // GPIO4: Encendido de emisores IR
 
 // Sensibilidad en milivoltios respecto al reposo para marcar detección [█]

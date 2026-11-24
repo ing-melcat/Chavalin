@@ -16,10 +16,10 @@
     - *Paro (libre):* `IN1 = 0`, `IN2 = 0`
 - **Multiplexor Analógico (U5 - CD74HC4067):**
   - `SIG` / `COM` (Pin 1) -> **GPIO 0** (Entrada ADC)
-  - `S0` (Pin 10) -> **GPIO 6**
-  - `S1` (Pin 11) -> **GPIO 7**
-  - `S2` (Pin 14) -> **GPIO 10**
-  - `S3` (Pin 13) -> **GPIO 20**
+  - `S0` (Pin 10) -> **GPIO 20** (conexión física real en placa)
+  - `S1` (Pin 11) -> **GPIO 10**
+  - `S2` (Pin 14) -> **GPIO 7**
+  - `S3` (Pin 13) -> **GPIO 6**
   - `EN` / `~E` (Pin 15) -> **GND** (Siempre habilitado)
 - **Barras de Sensores (U3 y U4 - 2x QTR-8A Chinas, 16 canales en total):**
   - `LED_ON` (Emisores IR) -> **GPIO 4** (`HIGH` para encender)

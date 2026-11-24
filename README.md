@@ -29,7 +29,7 @@ Proyecto de robot seguidor de línea velocista de 16 sensores basado en **ESP32-
 | **TB6612 (LEDC 20 kHz, 8 bits)** | `AI1` / `AI2` (Motor Izq A) | **GPIO 1**, **GPIO 2** | `PWMA`, `PWMB`, `STBY` fijos a `3.3V` |
 | **TB6612 (LEDC 20 kHz, 8 bits)** | `BI1` / `BI2` (Motor Der B) | **GPIO 3**, **GPIO 8** | `GPIO 8` comparte LED azul integrado |
 | **CD74HC4067 (Mux 16 ch)** | `SIG` / `COM` (Entrada ADC) | **GPIO 0** | Pull-down interno 45 kΩ forzado por registro |
-| **CD74HC4067 (Mux 16 ch)** | `S0`, `S1`, `S2`, `S3` | **GPIO 6, 7, 10, 20** | `EN` (`~E`) fijo a `GND` |
+| **CD74HC4067 (Mux 16 ch)** | `S0`, `S1`, `S2`, `S3` | **GPIO 20, 10, 7, 6** | `S0=20, S1=10, S2=7, S3=6`; `EN` (`~E`) fijo a `GND` |
 | **Barras 2× QTR-8A (V 22°)** | `LED_ON` (Emisores IR) | **GPIO 4** | `HIGH` activo; `CH00..07` Barra 1, `CH08..15` Barra 2 |
 | **Turbina EDF (LEDC 50 Hz)** | Señal PWM ESC (1000–2000 µs) | **GPIO 5** | Resolución 14 bits; armado seguro en `1000 µs` (0%) |
 | **Arrancador Juez RRT** | Señal `GO` (`5V, GND, GO, RDY`) | **GPIO 21** | `INPUT_PULLDOWN`, antirrebote 3 lecturas a 500 Hz |

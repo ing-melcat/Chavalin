@@ -2,14 +2,14 @@
 #include "driver/gpio.h"
 
 #define PIN_SIG      0
-#define PIN_S0       6
-#define PIN_S1       7
-#define PIN_S2      10
-#define PIN_S3      20
+#define PIN_S0      20
+#define PIN_S1      10
+#define PIN_S2       7
+#define PIN_S3       6
 #define PIN_LED_ON   4
 
 const uint8_t CTRL_PINS[5] = {PIN_S0, PIN_S1, PIN_S2, PIN_S3, PIN_LED_ON};
-const char*   CTRL_NAMES[5] = {"S0(GPIO6)", "S1(GPIO7)", "S2(GPIO10)", "S3(GPIO20)", "LED_ON(GPIO4)"};
+const char*   CTRL_NAMES[5] = {"S0(GPIO20)", "S1(GPIO10)", "S2(GPIO7)", "S3(GPIO6)", "LED_ON(GPIO4)"};
 
 uint16_t base_mv[16];
 bool base_lista = false;
@@ -64,7 +64,7 @@ void checarPinesControl() {
 }
 
 void checarPinSIG() {
-  Serial.println("\n[2] CHEQUEO DE ENTRADA SIG / COM (GPIO 0):");
+  Serial.println("\n[2] CHEQUEO DE ENTRADA SIG / COM (GPIO 0) Y CORTOS CON CONTROL:");
   setMux(15); // Probar en I15
   pinMode(PIN_SIG, INPUT_PULLDOWN);
   delay(5);
@@ -106,9 +106,8 @@ void loop() {
   gpio_pulldown_dis((gpio_num_t)PIN_SIG);
   digitalWrite(PIN_LED_ON, HIGH);
   delay(5);
-  Serial.print("\n1. SIN PULL (I15..I0)     : ");
-  for (int pos = 0; pos < 16; pos++) {
-    int ch = 15 - pos;
+  Serial.print("\n1. SIN PULL (I0..I15)     : ");
+  for (int ch = 0; ch < 16; ch++) {
     setMux(ch);
     delayMicroseconds(100);
     Serial.printf("%4d ", analogReadMilliVolts(PIN_SIG));
@@ -122,26 +121,24 @@ void loop() {
   delay(5);
   uint16_t mv_on[16];
   uint16_t min_v = 9999, max_v = 0;
-  Serial.print("2. PULLDOWN+IR ON(I15..I0): ");
-  for (int pos = 0; pos < 16; pos++) {
-    int ch = 15 - pos;
+  Serial.print("2. PULLDOWN+IR ON(I0..I15): ");
+  for (int ch = 0; ch < 16; ch++) {
     setMux(ch);
     delayMicroseconds(100);
     uint32_t s = 0;
     for (int k = 0; k < 4; k++) s += analogReadMilliVolts(PIN_SIG);
-    mv_on[pos] = s / 4;
-    if (mv_on[pos] < min_v) min_v = mv_on[pos];
-    if (mv_on[pos] > max_v) max_v = mv_on[pos];
-    Serial.printf("%4d ", mv_on[pos]);
+    mv_on[ch] = s / 4;
+    if (mv_on[ch] < min_v) min_v = mv_on[ch];
+    if (mv_on[ch] > max_v) max_v = mv_on[ch];
+    Serial.printf("%4d ", mv_on[ch]);
   }
   Serial.println();
 
   // 3. Con Pull-Down hardware + IR OFF
   digitalWrite(PIN_LED_ON, LOW);
   delay(5);
-  Serial.print("3. PULLDOWN+IR OFF        : ");
-  for (int pos = 0; pos < 16; pos++) {
-    int ch = 15 - pos;
+  Serial.print("3. PULLDOWN+IR OFF(I0..15): ");
+  for (int ch = 0; ch < 16; ch++) {
     setMux(ch);
     delayMicroseconds(100);
     Serial.printf("%4d ", analogReadMilliVolts(PIN_SIG));
@@ -158,14 +155,14 @@ void loop() {
   int conectados = 0;
   int activos = 0;
   Serial.print("4. CAMBIO vs REPOSO       : ");
-  for (int pos = 0; pos < 16; pos++) {
-    int diff = (int)mv_on[pos] - (int)base_mv[pos];
+  for (int ch = 0; ch < 16; ch++) {
+    int diff = (int)mv_on[ch] - (int)base_mv[ch];
     Serial.printf("%+4d ", diff);
-    if (mv_on[pos] > 500) conectados++;
-    if (abs(diff) >= 35 || mv_on[pos] < 2200) activos++;
+    if (mv_on[ch] > 500) conectados++;
+    if (abs(diff) >= 35 || mv_on[ch] < 2200) activos++;
   }
   Serial.println();
-  Serial.printf("RESUMEN: Canales >500mV=%d/16 (min=%u, max=%u mV) | Con reflejo/cambio=%d/16\n",
+  Serial.printf("RESUMEN: Canales >500mV=%d/16 (min=%u, max=%u mV) | Bajo 2200mV/cambio=%d/16\n",
                 conectados, min_v, max_v, activos);
 
   if (conectados == 0) {

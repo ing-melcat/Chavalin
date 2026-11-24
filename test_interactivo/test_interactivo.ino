@@ -14,10 +14,10 @@
 */
 
 #define PIN_SIG      0   // GPIO0 (COM)
-#define PIN_S0       6   // S0
-#define PIN_S1       7   // S1
-#define PIN_S2      10   // S2
-#define PIN_S3      20   // S3
+#define PIN_S0      20   // S0
+#define PIN_S1      10   // S1
+#define PIN_S2       7   // S2
+#define PIN_S3       6   // S3
 #define PIN_LED_ON   4   // LED_ON
 
 uint16_t valores_adc[16];

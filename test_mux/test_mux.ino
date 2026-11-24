@@ -19,10 +19,10 @@
 */
 
 #define PIN_SIG      0   // GPIO0: Entrada analógica ADC (COM del CD74HC4067)
-#define PIN_S0       6   // GPIO6: Selector S0
-#define PIN_S1       7   // GPIO7: Selector S1
-#define PIN_S2      10   // GPIO10: Selector S2
-#define PIN_S3      20   // GPIO20: Selector S3
+#define PIN_S0      20   // GPIO20: Selector S0
+#define PIN_S1      10   // GPIO10: Selector S1
+#define PIN_S2       7   // GPIO7: Selector S2
+#define PIN_S3       6   // GPIO6: Selector S3
 #define PIN_LED_ON   4   // GPIO4: Control de emisores IR
 
 void setCanalMux(uint8_t canal) {
@@ -53,7 +53,7 @@ void setup() {
   Serial.println("=======================================================");
   Serial.println("Pines:");
   Serial.println("  COM (Señal) -> GPIO 0 (ADC)");
-  Serial.println("  S0, S1, S2, S3 -> GPIO 6, 7, 10, 20");
+  Serial.println("  S0, S1, S2, S3 -> GPIO 20, 10, 7, 6");
   Serial.println("  LED_ON       -> GPIO 4");
   Serial.println("-------------------------------------------------------\n");
 }
