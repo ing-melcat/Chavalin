@@ -25,8 +25,8 @@
 #include "web_ui.h"
 
 // --- CONFIGURACIÓN WIFI ACCESS POINT ---
-const char* AP_SSID = "SeguidorPro-WiFi";
-const char* AP_PASS = "12345678";
+const char* AP_SSID = "Chavalin";
+const char* AP_PASS = "Chavalin";
 const char* NVS_NAMESPACE = "chavalin";
 
 httpd_handle_t server = NULL;
@@ -67,6 +67,7 @@ const int16_t PESOS_V[16] = {
 const float TAU_D          = 0.008f;  // Filtro derivativo (alpha_d = dt / (TAU_D + dt))
 const float TAU_SLOW       = 0.13f;   // Envolvente predictiva de entrada a horquilla
 const float TAU_TURB_DECAY = 0.16f;   // Decaimiento 160 ms de turbina al salir de curva
+const float TURB_RAMPA_S   = 0.20f;   // Rampa suave al activar turbina (200 ms)
 const float MAX_PID        = 160.0f;  // Saturación de salida diferencial PID
 
 const uint32_t LOOP_US_PITS = 12000UL; // 83.3 Hz (Wi-Fi ON)
@@ -104,7 +105,12 @@ portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
 uint16_t lecturas_mv[16];     // Orden lógico Left->Right: índice 0 = I0 (Izq) .. 15 = I15 (Der)
 uint16_t base_mv[16];
 uint16_t norm_s[16];          // Normalizado 0 a 1000 para centroide y UI web
+uint16_t cal_min_mv[16];
+uint16_t cal_max_mv[16];
 bool     calibrado_en_blanco = false;
+bool     usa_barrido         = false;
+volatile bool calibracion_barrido_activa = false;
+uint32_t cal_fin_ms          = 0;
 const int RANGO_MAX_MV = 600; // Rango de variación (mV) para escalar 0-1000
 const int UMBRAL_DELTA = 35;  // Umbral de detección limpio sobre base individual
 
@@ -118,11 +124,18 @@ volatile bool modo_competencia       = false;
 volatile bool wifi_apagado           = false;
 volatile bool turbina_manual         = false;
 volatile bool cmd_start_pendiente    = false;
+volatile bool cmd_start3_pendiente   = false;
+volatile bool cuenta_regresiva_activa = false;
 volatile bool cmd_stop_pendiente     = false;
 volatile bool cmd_turb_on_pendiente  = false;
 volatile bool cmd_turb_off_pendiente = false;
 volatile bool test_motores_pendiente = false;
 volatile bool calibrar_pendiente     = false;
+
+uint32_t cuenta_fin_ms   = 0;
+bool     turbina_rampa_done = false;
+bool     freno_activo    = false;
+uint32_t freno_fin_ms    = 0;
 
 int   turbina_pct    = 0;
 float turb_cmd       = 0.0f;
@@ -205,13 +218,41 @@ void setTurbina(int pct) {
 
 void detenerTodo() {
   seguidor_activo = false;
+  cuenta_regresiva_activa = false;
+  calibracion_barrido_activa = false;
   turbina_manual = false;
+  turbina_rampa_done = false;
+  freno_activo = false;
   stopMotors();
   setTurbina(0);
   turb_cmd = 0.0f;
 }
 
+void detenerConFreno() {
+  bool estaba_corriendo = seguidor_activo;
+  seguidor_activo = false;
+  cuenta_regresiva_activa = false;
+  calibracion_barrido_activa = false;
+  turbina_manual = false;
+  turbina_rampa_done = false;
+  setTurbina(0);
+  turb_cmd = 0.0f;
+  d_filt = 0.0f;
+  u_slow = 0.0f;
+  error_anterior = 0.0f;
+  if (estaba_corriendo) {
+    brakeMotors();
+    freno_activo = true;
+    freno_fin_ms = millis() + 220UL;
+  } else {
+    freno_activo = false;
+    stopMotors();
+  }
+}
+
 void iniciarCarrera(bool competencia) {
+  freno_activo = false;
+  cuenta_regresiva_activa = false;
   PidConfig cfg;
   portENTER_CRITICAL(&stateMux);
   cfg = competencia ? cfg_comp : cfg_pits;
@@ -227,8 +268,17 @@ void iniciarCarrera(bool competencia) {
   // Reglamento pág. 7: la turbina debe estar activa durante toda la carrera (nunca 0%)
   if (competencia && t_base < 20) t_base = COMP_DEF.turbina_base_pct;
 
-  turb_cmd = (float)t_base;
-  setTurbinaFloat(turb_cmd);
+  if (t_base <= 0) {
+    turb_cmd = 0.0f;
+    turbina_rampa_done = true;
+    setTurbina(0);
+  } else if (turb_cmd >= (float)t_base - 1.0f) {
+    turb_cmd = (float)t_base;
+    turbina_rampa_done = true;
+    setTurbinaFloat(turb_cmd);
+  } else {
+    turbina_rampa_done = false;
+  }
   seguidor_activo = true;
   lastLoopUs = micros();
 }
@@ -305,6 +355,15 @@ void cargarConfigNVS() {
     c.kd_phys           = readNvsFloatSafe(prefs, "c_kd",  COMP_DEF.kd_phys);
     c.turbina_base_pct  = constrain(prefs.getInt("c_tb",  COMP_DEF.turbina_base_pct), 20, 100);
     c.turbina_curva_pct = constrain(prefs.getInt("c_tc",  COMP_DEF.turbina_curva_pct), c.turbina_base_pct, 100);
+
+    if (prefs.getUChar("cal_ok", 0) == 1 &&
+        prefs.getBytesLength("cmin") == sizeof(cal_min_mv) &&
+        prefs.getBytesLength("cmax") == sizeof(cal_max_mv)) {
+      prefs.getBytes("cmin", cal_min_mv, sizeof(cal_min_mv));
+      prefs.getBytes("cmax", cal_max_mv, sizeof(cal_max_mv));
+      usa_barrido = true;
+      calibrado_en_blanco = true;
+    }
     prefs.end();
   }
 
@@ -342,6 +401,18 @@ bool guardarConfigNVS() {
   prefs.putInt("c_tb",   c.turbina_base_pct);
   prefs.putInt("c_tc",   c.turbina_curva_pct);
 
+  // Sincronización directa con seguidor_pro.ino (firmware oficial Cero Wi-Fi)
+  int pro_tb = constrain(max(20, p.turbina_base_pct), 20, 100);
+  int pro_tc = constrain(max(pro_tb, p.turbina_curva_pct), 20, 100);
+  prefs.putInt("vr",    p.vel_recta);
+  prefs.putInt("vc",    p.vel_curva);
+  prefs.putInt("kf",    p.k_freno);
+  prefs.putFloat("kpb", p.kp_base);
+  prefs.putFloat("kpc", p.kp_curva);
+  prefs.putFloat("kd",  p.kd_phys);
+  prefs.putInt("tb",    pro_tb);
+  prefs.putInt("tc",    pro_tc);
+
   prefs.end();
   return true;
 }
@@ -374,13 +445,35 @@ void leerSensores(bool modo_rapido_2ms) {
     }
     lecturas_mv[pos] = (uint16_t)(suma / muestras);
 
+    if (calibracion_barrido_activa) {
+      if (lecturas_mv[pos] < cal_min_mv[pos]) cal_min_mv[pos] = lecturas_mv[pos];
+      if (lecturas_mv[pos] > cal_max_mv[pos]) cal_max_mv[pos] = lecturas_mv[pos];
+    }
+
     // En modo aire, si un canal arrancó desconectado (<60 mV) y recupera reposo, auto-ajustar base
-    if (!calibrado_en_blanco && base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
+    if (!calibracion_barrido_activa && !usa_barrido && !calibrado_en_blanco &&
+        base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    if (pos < 2 || pos > 13 || base_mv[pos] < 60) {
+    if (pos < 2 || pos > 13 || (!calibracion_barrido_activa && !usa_barrido && base_mv[pos] < 60)) {
       norm_s[pos] = 0;
+    } else if (calibracion_barrido_activa) {
+      int span = (int)cal_max_mv[pos] - (int)cal_min_mv[pos];
+      int d    = (int)lecturas_mv[pos] - (int)cal_min_mv[pos];
+      norm_s[pos] = (span >= 60 && d > 30) ? (uint16_t)constrain(((long)d * 1000L) / span, 0, 1000) : 0;
+    } else if (usa_barrido) {
+      int span = (int)cal_max_mv[pos] - (int)cal_min_mv[pos];
+      if (span < 80) span = RANGO_MAX_MV;
+      int delta = (int)lecturas_mv[pos] - (int)cal_min_mv[pos];
+      int umbral = max(35, span / 6);
+      if (delta <= umbral) {
+        norm_s[pos] = 0;
+      } else {
+        int escala = max(umbral + 50, (span * 85) / 100);
+        long n = ((long)(delta - umbral) * 1000L) / (escala - umbral);
+        norm_s[pos] = (uint16_t)constrain(n, 0, 1000);
+      }
     } else {
       int delta = calibrado_en_blanco
                     ? ((int)lecturas_mv[pos] - (int)base_mv[pos])
@@ -450,6 +543,87 @@ void calibrarBase() {
   lastLoopUs = micros();
 }
 
+void iniciarCalibracionBarrido() {
+  detenerTodo();
+  for (int i = 0; i < 16; i++) {
+    cal_min_mv[i] = 4095;
+    cal_max_mv[i] = 0;
+  }
+  calibracion_barrido_activa = true;
+  cal_fin_ms = millis() + 3500UL;
+  if (Serial.availableForWrite() >= 64) {
+    Serial.println(">> [CAL] Barrido 3.5s iniciado: pasa los sensores sobre BLANCO y LINEA NEGRA...");
+  }
+  lastLoopUs = micros();
+}
+
+void finalizarCalibracionBarrido() {
+  calibracion_barrido_activa = false;
+  uint16_t spans[12];
+  int barridos = 0;
+
+  for (int i = 2; i <= 13; i++) {
+    int sp = (int)cal_max_mv[i] - (int)cal_min_mv[i];
+    if (cal_min_mv[i] >= 60 && cal_min_mv[i] < 1600 && sp >= 90) {
+      spans[barridos++] = (uint16_t)sp;
+    }
+  }
+
+  Preferences prefs;
+  if (barridos >= 3) {
+    for (int i = 0; i < barridos - 1; i++) {
+      for (int j = i + 1; j < barridos; j++) {
+        if (spans[j] < spans[i]) {
+          uint16_t tmp = spans[i]; spans[i] = spans[j]; spans[j] = tmp;
+        }
+      }
+    }
+    uint16_t med_span = spans[barridos / 2];
+    for (int i = 2; i <= 13; i++) {
+      if ((int)cal_max_mv[i] - (int)cal_min_mv[i] < 90) {
+        cal_max_mv[i] = (uint16_t)min(4095, (int)cal_min_mv[i] + (int)med_span);
+      }
+    }
+    usa_barrido = true;
+    calibrado_en_blanco = true;
+    if (prefs.begin(NVS_NAMESPACE, false)) {
+      prefs.putUChar("cal_ok", 1);
+      prefs.putBytes("cmin", cal_min_mv, sizeof(cal_min_mv));
+      prefs.putBytes("cmax", cal_max_mv, sizeof(cal_max_mv));
+      prefs.end();
+    }
+    if (Serial.availableForWrite() >= 48) {
+      Serial.printf(">> [CAL] Barrido 12ch OK (%d/12 ch, span med=%u mV) y guardado en NVS.\n", barridos, med_span);
+    }
+  } else {
+    usa_barrido = false;
+    uint16_t ord[12];
+    for (int i = 0; i < 12; i++) {
+      int pos = i + 2;
+      if (cal_min_mv[pos] <= cal_max_mv[pos]) {
+        base_mv[pos] = (uint16_t)(((uint32_t)cal_min_mv[pos] + (uint32_t)cal_max_mv[pos]) / 2UL);
+      }
+      ord[i] = base_mv[pos];
+    }
+    for (int i = 0; i < 11; i++) {
+      for (int j = i + 1; j < 12; j++) {
+        if (ord[j] < ord[i]) {
+          uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
+        }
+      }
+    }
+    calibrado_en_blanco = (ord[5] < 1000);
+    if (prefs.begin(NVS_NAMESPACE, false)) {
+      prefs.putUChar("cal_ok", 0);
+      prefs.end();
+    }
+    if (Serial.availableForWrite() >= 48) {
+      Serial.println(">> [CAL] Base fija actualizada (sin barrido de linea).");
+    }
+  }
+  lastLoopUs = micros();
+}
+
 float calcularErrorLinea() {
   long suma_ponderada = 0;
   long suma_pesos = 0;
@@ -478,9 +652,20 @@ static esp_err_t handleRoot(httpd_req_t *req) {
 }
 
 static esp_err_t handleData(httpd_req_t *req) {
-  char json[768];
+  char json[896];
   bool run = seguidor_activo;
   bool comp = modo_competencia;
+  int cd_tenths = 0;
+  if (cuenta_regresiva_activa) {
+    int32_t rem = (int32_t)(cuenta_fin_ms - millis());
+    if (rem > 0) cd_tenths = (int)((rem + 99) / 100);
+  }
+  int cal_tenths = 0;
+  if (calibracion_barrido_activa) {
+    int32_t rem = (int32_t)(cal_fin_ms - millis());
+    if (rem > 0) cal_tenths = (int)((rem + 99) / 100);
+  }
+  const char* cal_mode = usa_barrido ? "BARRIDO" : (calibrado_en_blanco ? "BLANCO" : "AIRE");
   int t_pct = turbina_pct;
   bool t_on = (t_pct > 0);
   float err = error_actual;
@@ -493,12 +678,15 @@ static esp_err_t handleData(httpd_req_t *req) {
   portEXIT_CRITICAL(&stateMux);
 
   int len = snprintf(json, sizeof(json),
-    "{\"run\":%s,\"comp\":%s,\"dt\":%d,\"tOn\":%s,\"turb\":%d,\"err\":%.0f,\"mL\":%d,\"mR\":%d,"
+    "{\"run\":%s,\"comp\":%s,\"cd\":%d,\"cal\":%d,\"cm\":\"%s\",\"dt\":%d,\"tOn\":%s,\"turb\":%d,\"err\":%.0f,\"mL\":%d,\"mR\":%d,"
     "\"vR\":%d,\"vC\":%d,\"kF\":%d,\"kpB\":%.3f,\"kpC\":%.3f,\"kd\":%.4f,\"tB\":%d,\"tC\":%d,"
     "\"s\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u],"
     "\"mv\":[%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]}",
     run ? "true" : "false",
     comp ? "true" : "false",
+    cd_tenths,
+    cal_tenths,
+    cal_mode,
     comp ? 2 : 12,
     t_on ? "true" : "false",
     t_pct,
@@ -554,9 +742,9 @@ static esp_err_t handleCmd(httpd_req_t *req) {
     if (httpd_query_key_value(q, "c", c, sizeof(c)) == ESP_OK) {
       if (strcmp(c, "start") == 0) {
         cmd_start_pendiente = true;
+      } else if (strcmp(c, "start3") == 0) {
+        cmd_start3_pendiente = true;
       } else if (strcmp(c, "stop") == 0) {
-        seguidor_activo = false;
-        turbina_manual = false;
         cmd_stop_pendiente = true;
       } else if (strcmp(c, "turb_on") == 0) {
         cmd_turb_on_pendiente = true;
@@ -564,13 +752,9 @@ static esp_err_t handleCmd(httpd_req_t *req) {
         turbina_manual = false;
         cmd_turb_off_pendiente = true;
       } else if (strcmp(c, "calibrate") == 0) {
-        seguidor_activo = false;
-        turbina_manual = false;
         cmd_stop_pendiente = true;
         calibrar_pendiente = true;
       } else if (strcmp(c, "test") == 0) {
-        seguidor_activo = false;
-        turbina_manual = false;
         cmd_stop_pendiente = true;
         test_motores_pendiente = true;
       }
@@ -676,62 +860,22 @@ void iniciarServidorHTTP() {
 }
 
 // -----------------------------------------------------------------------------
-// PROCESAMIENTO DE ENTRADAS FÍSICAS (RRT PIN_GO = 21 Y BOTÓN BOOT = 9)
+// PROCESAMIENTO DE ENTRADAS FÍSICAS (BOTÓN BOOT = 9 PARA CALIBRACIÓN)
 // -----------------------------------------------------------------------------
 void procesarEntradasFisicas(uint32_t nowUs) {
-  static uint32_t lastGoSampleUs = 0;
-  static uint8_t go_high_cnt = 0;
-  static uint8_t go_low_cnt  = 0;
-
-  if ((uint32_t)(nowUs - lastGoSampleUs) >= 2000UL) {
-    lastGoSampleUs = nowUs;
-    int go_state = digitalRead(PIN_GO);
-
-    if (!(modo_competencia && seguidor_activo)) {
-      if (go_state == HIGH) {
-        go_low_cnt = 0;
-        if (go_high_cnt < 3) go_high_cnt++;
-        if (go_high_cnt >= 3) {
-          go_high_cnt = 0;
-          apagarRadioWiFi();
-          iniciarCarrera(true);
-        }
-      } else {
-        go_high_cnt = 0;
-      }
-    } else {
-      if (go_state == LOW) {
-        go_high_cnt = 0;
-        if (go_low_cnt < 3) go_low_cnt++;
-        if (go_low_cnt >= 3) {
-          go_low_cnt = 0;
-          seguidor_activo = false;
-          turbina_manual = false;
-          brakeMotors();
-          delay(20);
-          stopMotors();
-          setTurbina(0);
-          turb_cmd = 0.0f;
-          lastLoopUs = micros();
-        }
-      } else {
-        go_low_cnt = 0;
-      }
-    }
-  }
+  (void)nowUs;
 
   // Botón físico BOOT (GPIO 9, INPUT_PULLUP) para recalibrar cuando está detenido
   static uint32_t boot_press_ms = 0;
   static bool boot_triggered = false;
-  if (!seguidor_activo) {
+  if (!seguidor_activo && !cuenta_regresiva_activa && !calibracion_barrido_activa) {
     if (digitalRead(PIN_BOOT_CAL) == LOW) {
       uint32_t nowMs = millis();
       if (boot_press_ms == 0) {
         boot_press_ms = nowMs;
       } else if (!boot_triggered && (uint32_t)(nowMs - boot_press_ms) >= 30UL) {
         boot_triggered = true;
-        detenerTodo();
-        calibrarBase();
+        iniciarCalibracionBarrido();
       }
     } else {
       boot_press_ms = 0;
@@ -781,7 +925,8 @@ void setup() {
   gpio_pullup_dis((gpio_num_t)PIN_SIG);
   gpio_pulldown_en((gpio_num_t)PIN_SIG);
 
-  // Cargar configuración PID desde Flash NVS (namespace "chavalin")
+  // Calibración inicial de referencia y luego carga de NVS (mantiene barrido guardado si existe)
+  calibrarBase();
   cargarConfigNVS();
 
   // Iniciar Wi-Fi Access Point en Pits
@@ -794,8 +939,6 @@ void setup() {
   WiFi.setSleep(false);
   IPAddress ip = WiFi.softAPIP();
   delay(250);
-
-  calibrarBase();
 
   iniciarServidorHTTP();
 
@@ -820,22 +963,28 @@ void setup() {
 void loop() {
   uint32_t nowUs = micros();
 
-  // 1. Verificar RRT PIN_GO (arranque/paro competencia) y botón BOOT
+  // 1. Verificar botón físico BOOT (GPIO 21 PIN_GO deshabilitado en modo Web)
   procesarEntradasFisicas(nowUs);
+
+  // Liberar freno activo no bloqueante tras 220 ms
+  if (freno_activo && (int32_t)(millis() - freno_fin_ms) >= 0) {
+    freno_activo = false;
+    stopMotors();
+  }
 
   // 2. Despachar comandos pendientes de HTTP de forma segura en loop()
   if (cmd_stop_pendiente) {
     cmd_stop_pendiente = false;
-    detenerTodo();
+    detenerConFreno();
   }
   if (cmd_turb_off_pendiente) {
     cmd_turb_off_pendiente = false;
     turbina_manual = false;
-    if (!seguidor_activo) setTurbina(0);
+    if (!seguidor_activo && !cuenta_regresiva_activa) setTurbina(0);
   }
   if (cmd_turb_on_pendiente) {
     cmd_turb_on_pendiente = false;
-    if (!seguidor_activo) {
+    if (!seguidor_activo && !cuenta_regresiva_activa && !calibracion_barrido_activa) {
       turbina_manual = true;
       PidConfig p;
       portENTER_CRITICAL(&stateMux);
@@ -846,23 +995,58 @@ void loop() {
   }
   if (calibrar_pendiente) {
     calibrar_pendiente = false;
-    detenerTodo();
-    calibrarBase();
+    iniciarCalibracionBarrido();
   }
   if (test_motores_pendiente) {
     test_motores_pendiente = false;
-    ejecutarTestMotores();
+    if (!calibracion_barrido_activa) {
+      ejecutarTestMotores();
+    }
+  }
+  if (cmd_start3_pendiente) {
+    cmd_start3_pendiente = false;
+    if (!seguidor_activo && !calibracion_barrido_activa) {
+      freno_activo = false;
+      stopMotors();
+      turbina_manual = false;
+      turb_cmd = 0.0f;
+      setTurbina(0);
+      cuenta_regresiva_activa = true;
+      cuenta_fin_ms = millis() + 3000UL;
+    }
   }
   if (cmd_start_pendiente) {
     cmd_start_pendiente = false;
-    if (!modo_competencia) {
+    if (!modo_competencia && !calibracion_barrido_activa) {
       iniciarCarrera(false); // Arranque desde UI web en modo Pits 12 ms
     }
   }
 
-  // 3. Lazo temporizado PID Dinámico: 2 ms (500 Hz, Wi-Fi OFF) o 12 ms (~83 Hz, Wi-Fi ON)
+  // Finalizar barrido de calibración de 3.5 s si venció el temporizador
+  if (calibracion_barrido_activa && (int32_t)(millis() - cal_fin_ms) >= 0) {
+    finalizarCalibracionBarrido();
+  }
+
+  // Cuenta regresiva de 3 s con pre-arranque de turbina en los últimos 500 ms
+  if (cuenta_regresiva_activa) {
+    int32_t rem_ms = (int32_t)(cuenta_fin_ms - millis());
+    if (rem_ms <= 0) {
+      cuenta_regresiva_activa = false;
+      iniciarCarrera(false);
+    } else if (rem_ms <= 500) {
+      PidConfig p;
+      portENTER_CRITICAL(&stateMux);
+      p = cfg_pits;
+      portEXIT_CRITICAL(&stateMux);
+      float frac = (float)(500 - rem_ms) / 500.0f;
+      turb_cmd = (float)p.turbina_base_pct * frac;
+      setTurbinaFloat(turb_cmd);
+    }
+  }
+
+  // 3. Lazo temporizado PID Dinámico: 2 ms (500 Hz, Wi-Fi OFF), 5 ms (barrido) o 12 ms (~83 Hz, Wi-Fi ON)
   nowUs = micros();
-  uint32_t periodUs = modo_competencia ? LOOP_US_COMP : LOOP_US_PITS;
+  uint32_t periodUs = modo_competencia ? LOOP_US_COMP : (calibracion_barrido_activa ? 5000UL : LOOP_US_PITS);
   if ((uint32_t)(nowUs - lastLoopUs) >= periodUs) {
     if ((uint32_t)(nowUs - lastLoopUs) >= periodUs * 2UL) {
       lastLoopUs = nowUs;
@@ -904,7 +1088,13 @@ void loop() {
       int t_curva = (t_base == 0 && !modo_competencia) ? 0 : max(t_base, cfg.turbina_curva_pct);
 
       float turb_tgt = (float)t_base + (float)(t_curva - t_base) * u_err;
-      if (turb_tgt >= turb_cmd) {
+      if (!turbina_rampa_done) {
+        turb_cmd += (float)max(t_base, 1) * (dt_s / TURB_RAMPA_S);
+        if (turb_cmd >= (float)t_base) {
+          turb_cmd = (float)t_base;
+          turbina_rampa_done = true;
+        }
+      } else if (turb_tgt >= turb_cmd) {
         turb_cmd = turb_tgt;
       } else {
         turb_cmd = turb_tgt + (turb_cmd - turb_tgt) * expf(-dt_s / TAU_TURB_DECAY);
@@ -919,10 +1109,9 @@ void loop() {
   if (Serial.available()) {
     char ch = Serial.read();
     if (ch == 's' || ch == 'S') {
-      detenerTodo();
+      detenerConFreno();
     } else if ((ch == 'c' || ch == 'C') && !seguidor_activo) {
-      detenerTodo();
-      calibrarBase();
+      iniciarCalibracionBarrido();
     } else if ((ch == 'u' || ch == 'U') && !seguidor_activo && !modo_competencia) {
       ejecutarTestTurbina();
     } else if ((ch == 'm' || ch == 'M') && !seguidor_activo && !modo_competencia) {

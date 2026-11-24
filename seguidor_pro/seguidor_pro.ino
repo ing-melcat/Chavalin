@@ -115,7 +115,10 @@ const int UMBRAL_DELTA = 35;
 uint16_t lecturas_mv[16];
 uint16_t base_mv[16];
 uint16_t norm_s[16];
+uint16_t cal_min_mv[16];
+uint16_t cal_max_mv[16];
 bool     calibrado_en_blanco = false;
+bool     usa_barrido = false;
 
 // --- ESTADO DEL ROBOT Y LAZO DE CONTROL ---
 enum EstadoRobot {
@@ -130,6 +133,8 @@ bool     go_bloqueado_hasta_low = false;
 
 bool     freno_activo = false;
 uint32_t freno_fin_ms = 0;
+bool     cuenta_salida_activa = false;
+uint32_t cuenta_salida_fin_ms = 0;
 
 int      motor_L = 0;
 int      motor_R = 0;
@@ -220,6 +225,15 @@ void cargarConfigNVS() {
   cfg.kd_phys        = prefs.getFloat("kd", DEFAULT_KD_PHYS);
   cfg.turb_base_pct  = prefs.getInt("tb", DEFAULT_TURB_BASE_PCT);
   cfg.turb_curva_pct = prefs.getInt("tc", DEFAULT_TURB_CURVA_PCT);
+
+  if (prefs.getUChar("cal_ok", 0) == 1 &&
+      prefs.getBytesLength("cmin") == sizeof(cal_min_mv) &&
+      prefs.getBytesLength("cmax") == sizeof(cal_max_mv)) {
+    prefs.getBytes("cmin", cal_min_mv, sizeof(cal_min_mv));
+    prefs.getBytes("cmax", cal_max_mv, sizeof(cal_max_mv));
+    usa_barrido = true;
+    calibrado_en_blanco = true;
+  }
   prefs.end();
   normalizarConfig();
 }
@@ -325,12 +339,24 @@ void leerSensores() {
     lecturas_mv[pos] = (uint16_t)(suma / 2);
 
     // En modo aire, si un canal arrancó desconectado (<60 mV) y recupera reposo, auto-ajustar base
-    if (!calibrado_en_blanco && base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
+    if (!usa_barrido && !calibrado_en_blanco && base_mv[pos] < 60 && lecturas_mv[pos] >= 2450) {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    if (pos < 2 || pos > 13 || base_mv[pos] < 60) {
+    if (pos < 2 || pos > 13 || (!usa_barrido && base_mv[pos] < 60)) {
       norm_s[pos] = 0;
+    } else if (usa_barrido) {
+      int span = (int)cal_max_mv[pos] - (int)cal_min_mv[pos];
+      if (span < 80) span = RANGO_MAX_MV;
+      int delta = (int)lecturas_mv[pos] - (int)cal_min_mv[pos];
+      int umbral = max(35, span / 6);
+      if (delta <= umbral) {
+        norm_s[pos] = 0;
+      } else {
+        int escala = max(umbral + 50, (span * 85) / 100);
+        long n = ((long)(delta - umbral) * 1000L) / (escala - umbral);
+        norm_s[pos] = (uint16_t)constrain(n, 0, 1000);
+      }
     } else {
       int delta = calibrado_en_blanco
                     ? ((int)lecturas_mv[pos] - (int)base_mv[pos])
@@ -423,6 +449,98 @@ void calibrarBase() {
   last_loop_us = micros();
 }
 
+void calibrarBarrido35s() {
+  stopMotors();
+  setTurbina(0.0f);
+  turb_cmd = 0.0f;
+  turbina_rampa_done = false;
+  serialWriteNB(">> [CAL] Barrido 3.5s: pasa los sensores sobre BLANCO y LINEA NEGRA...\n");
+
+  for (int i = 0; i < 16; i++) {
+    cal_min_mv[i] = 4095;
+    cal_max_mv[i] = 0;
+  }
+
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < 3500UL) {
+    gpio_pullup_dis((gpio_num_t)PIN_SIG);
+    gpio_pulldown_en((gpio_num_t)PIN_SIG);
+    for (uint8_t pos = 0; pos < 16; pos++) {
+      seleccionarCanalMux(pos);
+      uint32_t suma = analogReadMilliVolts(PIN_SIG);
+      suma += analogReadMilliVolts(PIN_SIG);
+      uint16_t mv = (uint16_t)(suma / 2);
+      if (mv < cal_min_mv[pos]) cal_min_mv[pos] = mv;
+      if (mv > cal_max_mv[pos]) cal_max_mv[pos] = mv;
+    }
+    delay(4);
+  }
+
+  uint16_t spans[12];
+  int barridos = 0;
+  for (int i = 2; i <= 13; i++) {
+    int sp = (int)cal_max_mv[i] - (int)cal_min_mv[i];
+    if (cal_min_mv[i] >= 60 && cal_min_mv[i] < 1600 && sp >= 90) {
+      spans[barridos++] = (uint16_t)sp;
+    }
+  }
+
+  if (barridos >= 3) {
+    for (int i = 0; i < barridos - 1; i++) {
+      for (int j = i + 1; j < barridos; j++) {
+        if (spans[j] < spans[i]) {
+          uint16_t tmp = spans[i]; spans[i] = spans[j]; spans[j] = tmp;
+        }
+      }
+    }
+    uint16_t med_span = spans[barridos / 2];
+    for (int i = 2; i <= 13; i++) {
+      if ((int)cal_max_mv[i] - (int)cal_min_mv[i] < 90) {
+        cal_max_mv[i] = (uint16_t)min(4095, (int)cal_min_mv[i] + (int)med_span);
+      }
+    }
+    usa_barrido = true;
+    calibrado_en_blanco = true;
+    if (prefs.begin("chavalin", false)) {
+      prefs.putUChar("cal_ok", 1);
+      prefs.putBytes("cmin", cal_min_mv, sizeof(cal_min_mv));
+      prefs.putBytes("cmax", cal_max_mv, sizeof(cal_max_mv));
+      prefs.end();
+    }
+    serialWriteNB(">> [CAL] Barrido 3.5s OK y guardado en NVS.\n");
+  } else {
+    usa_barrido = false;
+    uint16_t ord[12];
+    for (int i = 0; i < 12; i++) {
+      int pos = i + 2;
+      base_mv[pos] = (cal_min_mv[pos] <= cal_max_mv[pos])
+                       ? (uint16_t)(((uint32_t)cal_min_mv[pos] + (uint32_t)cal_max_mv[pos]) / 2UL)
+                       : base_mv[pos];
+      ord[i] = base_mv[pos];
+    }
+    for (int i = 0; i < 11; i++) {
+      for (int j = i + 1; j < 12; j++) {
+        if (ord[j] < ord[i]) {
+          uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
+        }
+      }
+    }
+    calibrado_en_blanco = (ord[5] < 1000);
+    if (prefs.begin("chavalin", false)) {
+      prefs.putUChar("cal_ok", 0);
+      prefs.end();
+    }
+    serialWriteNB(">> [CAL] Base fija actualizada (sin barrido de linea).\n");
+  }
+
+  leerSensores();
+  error_actual = 0.0f;
+  error_anterior = 0.0f;
+  d_filt = 0.0f;
+  u_slow = 0.0f;
+  last_loop_us = micros();
+}
+
 // Centroide con PESOS_V[16] y memoria de borde (±750 si los 16 sensores pierden la línea)
 float calcularErrorLinea(bool en_carrera) {
   long suma_ponderada = 0;
@@ -451,12 +569,20 @@ float calcularErrorLinea(bool en_carrera) {
 // TRANSICIONES DE CARRERA, FRENADO Y CONTROL PID DINÁMICO (500 Hz)
 // -----------------------------------------------------------------------------
 void iniciarCarrera(EstadoRobot nuevo_estado) {
+  bool ya_preramp = (!cuenta_salida_activa && turb_cmd >= (float)cfg.turb_base_pct * 0.8f);
   freno_activo = false;
+  cuenta_salida_activa = false;
   estado = nuevo_estado;
   d_filt = 0.0f;
   u_slow = 0.0f;
-  turb_cmd = 0.0f;
-  turbina_rampa_done = false;
+  if (ya_preramp) {
+    turb_cmd = (float)cfg.turb_base_pct;
+    turbina_rampa_done = true;
+    setTurbina(turb_cmd);
+  } else {
+    turb_cmd = 0.0f;
+    turbina_rampa_done = false;
+  }
   error_actual = calcularErrorLinea(true);
   error_anterior = error_actual; // Evita pico derivativo en el primer ciclo
 
@@ -471,6 +597,7 @@ void detenerPorJuez() {
   brakeMotors();
   setTurbina(0.0f);
   estado = DETENIDO;
+  cuenta_salida_activa = false;
   freno_activo = true;
   freno_fin_ms = millis() + 300;
   d_filt = 0.0f;
@@ -484,6 +611,7 @@ void detenerBanco() {
   stopMotors();
   setTurbina(0.0f);
   estado = DETENIDO;
+  cuenta_salida_activa = false;
   freno_activo = false;
   d_filt = 0.0f;
   u_slow = 0.0f;
@@ -620,7 +748,7 @@ void ejecutarComandoSerial(const char* raw) {
     }
     switch (cmd) {
       case 'c':
-        calibrarBase();
+        calibrarBarrido35s();
         break;
       case 'v':
         telemetria_serial = !telemetria_serial;
@@ -785,22 +913,42 @@ void procesarSerial() {
 
 void verificarBotonCalibracion(uint32_t now_ms) {
   static bool     boot_prev = false;
-  static bool     boot_handled = false;
+  static bool     boot_long_triggered = false;
+  static bool     boot_stop_handled = false;
   static uint32_t boot_press_ms = 0;
 
   bool pressed = (digitalRead(PIN_BOOT_CAL) == LOW);
   if (pressed) {
     if (!boot_prev) {
       boot_prev = true;
-      boot_handled = false;
+      boot_long_triggered = false;
+      boot_stop_handled = false;
       boot_press_ms = now_ms;
-    } else if (!boot_handled && (now_ms - boot_press_ms >= 35UL)) {
-      boot_handled = true;
-      calibrarBase();
+    } else {
+      uint32_t dur = (uint32_t)(now_ms - boot_press_ms);
+      if (estado != DETENIDO || cuenta_salida_activa) {
+        if (!boot_stop_handled && dur >= 40UL) {
+          boot_stop_handled = true;
+          boot_long_triggered = true;
+          detenerPorJuez();
+        }
+      } else if (!boot_stop_handled && !boot_long_triggered && dur >= 900UL) {
+        boot_long_triggered = true;
+        cuenta_salida_activa = true;
+        cuenta_salida_fin_ms = now_ms + 3000UL;
+        serialWriteNB(">> [BOOT] Salida en 3 s...\n");
+      }
     }
   } else {
+    if (boot_prev && !boot_long_triggered && !boot_stop_handled && estado == DETENIDO && !cuenta_salida_activa) {
+      uint32_t dur = (uint32_t)(now_ms - boot_press_ms);
+      if (dur >= 40UL && dur <= 700UL) {
+        calibrarBarrido35s();
+      }
+    }
     boot_prev = false;
-    boot_handled = false;
+    boot_long_triggered = false;
+    boot_stop_handled = false;
   }
 }
 
@@ -865,12 +1013,17 @@ void setup() {
   // 6. Cargar parametros persistentes desde Flash NVS ("chavalin")
   cargarConfigNVS();
 
-  // 7. Autocalibración inteligente inicial (percentil 75 ord[12])
-  calibrarBase();
+  // 7. Restaurar barrido 12ch guardado en NVS (si existe) o autocalibración base
+  if (usa_barrido) {
+    leerSensores();
+    serialWriteNB(">> [NVS] Calibracion de barrido 12ch restaurada de Flash.\n");
+  } else {
+    calibrarBase();
+  }
 
   serialWriteNB("====================================================\n");
   serialWriteNB(" SEGUIDOR PRO v1 - 500 Hz SERIAL+NVS (CERO WIFI)\n");
-  serialWriteNB(" Pista: BOOT(9) recalibra | RRT GO(21) inicia/para\n");
+  serialWriteNB(" Pista: BOOT corto=calibrar | BOOT 1s=arrancar 3s | RRT GO(21)\n");
   serialWriteNB("====================================================\n");
   imprimirConfigSerial();
 
@@ -900,9 +1053,20 @@ void loop() {
   // Procesar comandos USB Serial (no bloqueante)
   procesarSerial();
 
-  // Botón físico BOOT (GPIO 9) para recalibrar en pista mientras está detenido
-  if (estado == DETENIDO) {
-    verificarBotonCalibracion(now_ms);
+  // Botón físico BOOT (GPIO 9): corto=calibrar, 1s=arrancar 3s, en carrera=freno/paro
+  verificarBotonCalibracion(now_ms);
+
+  // Cuenta regresiva de salida desde botón BOOT (3 s con pre-rampa de turbina últimos 500 ms)
+  if (cuenta_salida_activa) {
+    int32_t rem_ms = (int32_t)(cuenta_salida_fin_ms - now_ms);
+    if (rem_ms <= 0) {
+      cuenta_salida_activa = false;
+      iniciarCarrera(BANCO_SEGUIDOR);
+    } else if (rem_ms <= 500) {
+      float frac = (float)(500 - rem_ms) / 500.0f;
+      turb_cmd = (float)cfg.turb_base_pct * frac;
+      setTurbina(turb_cmd);
+    }
   }
 
   // Lazo determinista a 500 Hz (dt = 2000 us = 2 ms)

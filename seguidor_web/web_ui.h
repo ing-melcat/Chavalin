@@ -36,15 +36,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; }
     .dot.online { background: var(--green); box-shadow: 0 0 8px var(--green); }
 
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     button {
       background: #1a2640; color: var(--text); border: 1px solid var(--border);
-      padding: 7px 14px; border-radius: 6px; font-size: 0.82rem; font-weight: 600;
-      cursor: pointer; transition: all 0.15s;
+      padding: 9px 14px; border-radius: 6px; font-size: 0.84rem; font-weight: 700;
+      cursor: pointer; transition: all 0.15s; touch-action: manipulation;
     }
     button:hover { border-color: var(--cyan); color: #fff; }
     button.primary { background: #006680; border-color: var(--cyan); color: #fff; }
-    button.danger { background: #5a1220; border-color: var(--red); color: #fff; }
+    button.warn { background: #6b3d00; border-color: var(--orange); color: #fff; }
+    button.danger { background: #7a1426; border-color: var(--red); color: #fff; font-size: 0.94rem; padding: 10px 18px; }
     button.active { background: #006e3a; border-color: var(--green); color: #fff; }
 
     /* Telemetry & PID grid */
@@ -56,10 +57,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       display: flex; flex-direction: column; gap: 4px;
     }
     .param-box label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .param-box .val { font-size: 1.05rem; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .param-box .val { font-size: 1.02rem; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
     .param-box input, .param-box select {
       background: #090e1a; border: 1px solid var(--border); color: var(--cyan);
-      padding: 4px 8px; border-radius: 4px; font-size: 0.92rem; font-weight: 700; width: 100%;
+      padding: 5px 8px; border-radius: 4px; font-size: 0.92rem; font-weight: 700; width: 100%;
     }
     .param-actions {
       display: flex; gap: 6px; height: 100%; align-items: stretch;
@@ -77,7 +78,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
     }
-    .card-title { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; font-weight: 700; }
+    .card-title { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; font-weight: 700; text-align: center; }
 
     /* Gauges */
     .gauge-wrap { position: relative; width: 170px; height: 120px; display: flex; align-items: center; justify-content: center; }
@@ -112,6 +113,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     .legend span { display: flex; align-items: center; gap: 5px; }
     .legend i { width: 10px; height: 3px; display: inline-block; }
     canvas#historyChart { width: 100%; height: 190px; background: #090e1a; border-radius: 6px; border: 1px solid var(--border); }
+
+    /* Race sync footer */
+    .sync-banner {
+      background: #0d1629; border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 14px; font-size: 0.78rem; color: var(--cyan); font-family: monospace;
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
@@ -123,24 +131,25 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <span><i id="connDot" class="dot"></i> <span id="connText">Conectando al ESP32-C3...</span></span>
     </div>
     <div class="actions">
-      <button onclick="sendCmd('calibrate')">Calibrar Sensores</button>
-      <button id="btnRun" class="primary" onclick="toggleRun()">Arrancar Seguidor</button>
+      <button id="btnCal" onclick="sendCmd('calibrate')">Calibrar L&iacute;nea (3.5s)</button>
+      <button id="btnStart3" class="primary" onclick="startCountdown()">Salida 3s (Turbina)</button>
+      <button id="btnRun" onclick="toggleRun()">Arrancar Ya</button>
       <button id="btnTurb" onclick="toggleTurb()">Turbina: OFF</button>
       <button onclick="sendCmd('test')">Test Motores</button>
       <button class="danger" onclick="sendCmd('stop')">PARO (E-STOP)</button>
-      <button onclick="clearChart()">Limpiar Gráfica</button>
+      <button onclick="clearChart()">Limpiar Gr&aacute;fica</button>
     </div>
   </div>
 
   <!-- Dynamic PID & Telemetry Readouts -->
   <div class="params-grid">
-    <div class="param-box"><label>Estado</label><div class="val" id="valMode">PITS 12ms</div></div>
-    <div class="param-box"><label>Error Línea</label><div class="val" id="valError">0</div></div>
+    <div class="param-box"><label>Estado</label><div class="val" id="valMode">LISTO</div></div>
+    <div class="param-box"><label>Error L&iacute;nea</label><div class="val" id="valError">0</div></div>
     <div class="param-box">
       <label>Perfil NVS</label>
       <select id="selProfile" onchange="onProfileChange()">
-        <option value="pits">Pits 12 ms</option>
-        <option value="comp">Comp 2 ms</option>
+        <option value="pits">Ajuste Web + Sync Carrera</option>
+        <option value="comp">Comp 2 ms (RRT)</option>
       </select>
     </div>
     <div class="param-box"><label>Vel Recta</label><input type="number" id="inVelR" value="142" min="0" max="255" step="1"></div>
@@ -154,7 +163,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="param-box" style="justify-content:center; grid-column: span 1;">
       <div class="param-actions">
         <button id="btnApply" class="primary" style="flex:1;" onclick="applyPID()">Aplicar PID</button>
-        <button title="Restaurar calibración @sim-math" onclick="resetPID()">Reset</button>
+        <button title="Restaurar calibraci&oacute;n @sim-math" onclick="resetPID()">Reset</button>
       </div>
     </div>
   </div>
@@ -174,7 +183,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
 
     <div class="card">
-      <div class="card-title">BARRA DE LÍNEA NORMALIZADA 0-1000 (IZQ I0 &larr; &rarr; I15 DER)</div>
+      <div class="card-title">12 SENSORES ACTIVOS I2..I13 (IZQ I0 &larr; &rarr; I15 DER; PUNTAS ATENUADAS)</div>
       <div class="sensors-wrap">
         <div class="bars-container" id="barsContainer"></div>
         <div class="bar-labels" id="barLabels"></div>
@@ -207,6 +216,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
     <canvas id="historyChart"></canvas>
   </div>
+
+  <!-- Race Sync Banner -->
+  <div class="sync-banner" id="raceSyncBox">
+    Listo para Carrera Oficial (seguidor_pro Cero Wi-Fi &mdash; guardado auto en Flash NVS): cargando...
+  </div>
 </div>
 
 <script>
@@ -216,8 +230,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   const barEls = [];
   const mvEls = [];
   for (let i = 0; i < 16; i++) {
+    const masked = (i < 2 || i > 13);
     const col = document.createElement('div');
     col.className = 'bar-col';
+    if (masked) col.style.opacity = '0.35';
     const fill = document.createElement('div');
     fill.className = 'bar-fill idle';
     fill.style.height = '5%';
@@ -227,15 +243,19 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     const lbl = document.createElement('div');
     lbl.textContent = 'I' + i;
+    if (masked) lbl.style.opacity = '0.35';
     barLabels.appendChild(lbl);
 
     const mv = document.createElement('div');
     mv.textContent = '----';
+    if (masked) mv.style.opacity = '0.35';
     barMvs.appendChild(mv);
     mvEls.push(mv);
   }
 
   let running = false;
+  let countdownActive = false;
+  let calibratingActive = false;
   let turbOn = false;
   let configLoaded = false;
   let cfgCache = {
@@ -247,6 +267,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   const histL = new Array(maxPoints).fill(0);
   const histR = new Array(maxPoints).fill(0);
   const histE = new Array(maxPoints).fill(0);
+
+  function updateSyncBanner() {
+    const p = cfgCache.pits || {};
+    const tbRace = Math.max(20, Number(p.tb || 0));
+    const tcRace = Math.max(tbRace, Number(p.tc || 0));
+    document.getElementById('raceSyncBox').textContent =
+      `Listo para Carrera Oficial (seguidor_pro Cero Wi-Fi — guardado auto en Flash NVS): ` +
+      `vr=${p.vr} vc=${p.vc} kf=${p.kf} kpb=${Number(p.kpb).toFixed(3)} kpc=${Number(p.kpc).toFixed(3)} ` +
+      `kd=${Number(p.kd).toFixed(4)} tb=${tbRace}% tc=${tcRace}%`;
+  }
 
   function fillProfileInputs(mode) {
     const p = cfgCache[mode] || cfgCache.pits;
@@ -260,6 +290,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     inTurb.min = (mode === 'comp') ? '20' : '0';
     inTurb.value = p.tb;
     document.getElementById('inTurbC').value = p.tc;
+    updateSyncBanner();
   }
 
   function onProfileChange() {
@@ -292,7 +323,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     const h = canvas.height = canvas.clientHeight;
     ctx.clearRect(0, 0, w, h);
 
-    // Center zero line
     ctx.strokeStyle = '#1e2d4a';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -324,6 +354,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   async function pollData() {
+    let nextDelay = 90;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 600);
     try {
@@ -342,25 +373,54 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('connDot').className = 'dot online';
       document.getElementById('connText').textContent = `Conectado a ESP32-C3 (Lazo ${d.dt || 12} ms / NVS Activo)`;
 
-      running = d.run;
+      running = !!d.run;
+      countdownActive = (d.cd || 0) > 0;
+      calibratingActive = (d.cal || 0) > 0;
+
+      const btnCal = document.getElementById('btnCal');
+      if (calibratingActive) {
+        btnCal.textContent = `Barriendo... ${(d.cal / 10).toFixed(1)}s`;
+        btnCal.className = 'warn';
+      } else {
+        btnCal.textContent = 'Calibrar L\u00ednea (3.5s)';
+        btnCal.className = (d.cm === 'BARRIDO') ? 'active' : '';
+      }
+
+      const btnStart3 = document.getElementById('btnStart3');
+      if (countdownActive) {
+        btnStart3.textContent = `Cancelar (${(d.cd / 10).toFixed(1)}s)`;
+        btnStart3.className = 'danger';
+      } else {
+        btnStart3.textContent = 'Salida 3s (Turbina)';
+        btnStart3.className = running ? '' : 'primary';
+      }
+
       const btnRun = document.getElementById('btnRun');
-      btnRun.textContent = running ? 'Detener Seguidor' : 'Arrancar Seguidor';
-      btnRun.className = running ? 'active' : 'primary';
+      btnRun.textContent = running ? 'Detener Seguidor' : 'Arrancar Ya';
+      btnRun.className = running ? 'active' : '';
 
       turbOn = !!d.tOn;
       const btnTurb = document.getElementById('btnTurb');
       btnTurb.textContent = turbOn ? `Turbina: ON (${d.turb}%)` : 'Turbina: OFF';
       btnTurb.className = turbOn ? 'active' : '';
 
-      const dtLabel = (d.dt || 12) + 'ms';
-      document.getElementById('valMode').textContent = running ? `AUTO ${dtLabel}` : `PITS ${dtLabel}`;
+      const valMode = document.getElementById('valMode');
+      if (calibratingActive) {
+        valMode.textContent = `CALIBRANDO ${(d.cal / 10).toFixed(1)}s`;
+      } else if (countdownActive) {
+        valMode.textContent = `SALIDA EN ${(d.cd / 10).toFixed(1)}s`;
+      } else if (running) {
+        valMode.textContent = `CORRIENDO (${d.dt || 12}ms)`;
+      } else {
+        valMode.textContent = (d.cm === 'BARRIDO') ? 'LISTO (BARRIDO)' : `LISTO (${d.cm || 'BASE'})`;
+      }
       document.getElementById('valError').textContent = d.err;
 
       updateGauge('arcL', 'txtMotL', d.mL);
       updateGauge('arcR', 'txtMotR', d.mR);
 
       for (let i = 0; i < 16; i++) {
-        const v = d.s[i]; // 0 - 1000
+        const v = d.s[i];
         const pct = Math.max(4, Math.min(100, v / 10));
         barEls[i].style.height = pct + '%';
         barEls[i].className = v > 60 ? 'bar-fill' : 'bar-fill idle';
@@ -371,12 +431,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       histR.push(d.mR); histR.shift();
       histE.push(Math.max(-255, Math.min(255, d.err / 3))); histE.shift();
       drawChart();
+
+      if (running) nextDelay = 250;
     } catch (e) {
       clearTimeout(timer);
       document.getElementById('connDot').className = 'dot';
-      document.getElementById('connText').textContent = 'Sin conexión con el robot...';
+      document.getElementById('connText').textContent = 'Sin conexi\u00f3n con el robot...';
     }
-    setTimeout(pollData, 80);
+    setTimeout(pollData, nextDelay);
   }
 
   async function sendCmd(cmd) {
@@ -384,7 +446,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   }
 
   function toggleRun() {
-    sendCmd(running ? 'stop' : 'start');
+    sendCmd((running || countdownActive) ? 'stop' : 'start');
+  }
+
+  function startCountdown() {
+    sendCmd((running || countdownActive) ? 'stop' : 'start3');
   }
 
   async function toggleTurb() {
