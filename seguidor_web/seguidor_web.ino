@@ -57,10 +57,10 @@ const uint8_t  ESC_PWM_RES  = 14; // 0..16383 (~1.22 us por paso)
 #define PIN_GO       21   // GPIO 21: RRT GO (INPUT_PULLDOWN, HIGH = Competencia)
 #define PIN_BOOT_CAL  9   // GPIO 9:  Botón BOOT físico para calibrar en reposo
 
-// --- GEOMETRÍA EN V SIMÉTRICA 12 SENSORES ACTIVOS (I2=-750 .. I13=+750; I0,I1,I14,I15 enmascarados) ---
+// --- GEOMETRÍA EN V (L0=150 mm, alpha=22 deg, I0=-750 Izq .. I15=+750 Der) ---
 const int16_t PESOS_V[16] = {
-     0,    0, -750, -610, -470, -330, -195,  -65,
-    65,  195,  330,  470,  610,  750,    0,    0
+  -750, -649, -548, -447, -347, -249, -154, -62,
+    62,  154,  249,  347,  447,  548,  649,  750
 };
 
 // --- CONSTANTES FÍSICAS DEL PID DINÁMICO (@sim-math) ---
@@ -456,7 +456,7 @@ void leerSensores(bool modo_rapido_2ms) {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    if (pos < 2 || pos > 13 || (!calibracion_barrido_activa && !usa_barrido && base_mv[pos] < 60)) {
+    if (!calibracion_barrido_activa && !usa_barrido && base_mv[pos] < 60) {
       norm_s[pos] = 0;
     } else if (calibracion_barrido_activa) {
       int span = (int)cal_max_mv[pos] - (int)cal_min_mv[pos];
@@ -509,11 +509,11 @@ void calibrarBase() {
     base_mv[i] = (uint16_t)(acum[i] / 16);
   }
 
-  // Mediana de los 12 sensores activos (I2..I13) para detectar fondo blanco vs aire
-  uint16_t ord[12];
-  for (int i = 0; i < 12; i++) ord[i] = base_mv[i + 2];
-  for (int i = 0; i < 11; i++) {
-    for (int j = i + 1; j < 12; j++) {
+  // Mediana de los 16 sensores (I0..I15) para detectar fondo blanco vs aire
+  uint16_t ord[16];
+  for (int i = 0; i < 16; i++) ord[i] = base_mv[i];
+  for (int i = 0; i < 15; i++) {
+    for (int j = i + 1; j < 16; j++) {
       if (ord[j] < ord[i]) {
         uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
       }
@@ -521,22 +521,22 @@ void calibrarBase() {
   }
 
   int canales_bajos = 0;
-  for (int i = 2; i <= 13; i++) {
+  for (int i = 0; i < 16; i++) {
     if (base_mv[i] < 60) canales_bajos++;
   }
 
   // Conservamos la base individual de cada canal en ambos modos para compensar diferencias entre barras
-  calibrado_en_blanco = (ord[5] < 1000);
+  calibrado_en_blanco = (ord[7] < 1000);
 
   if (Serial.availableForWrite() >= 64) {
-    Serial.printf("Modo Calibracion (12ch I2..I13): %s\n",
+    Serial.printf("Modo Calibracion (16ch I0..I15): %s\n",
                   calibrado_en_blanco ? "BLANCO (detecta linea negra)" : "AIRE (detecta papel blanco)");
     Serial.print("Base mV (I0 -> I15): ");
     for (int i = 0; i < 16; i++) {
       Serial.printf("I%d:%u ", i, base_mv[i]);
     }
     Serial.println();
-    if (canales_bajos == 12) {
+    if (canales_bajos == 16) {
       Serial.println("[!] ALERTA HARDWARE: Canales activos ~0 mV -> Revisar SIG (GPIO 0), EN a GND o 3.3V!");
     }
   }
@@ -559,10 +559,10 @@ void iniciarCalibracionBarrido() {
 
 void finalizarCalibracionBarrido() {
   calibracion_barrido_activa = false;
-  uint16_t spans[12];
+  uint16_t spans[16];
   int barridos = 0;
 
-  for (int i = 2; i <= 13; i++) {
+  for (int i = 0; i < 16; i++) {
     int sp = (int)cal_max_mv[i] - (int)cal_min_mv[i];
     if (cal_min_mv[i] >= 60 && cal_min_mv[i] < 1600 && sp >= 90) {
       spans[barridos++] = (uint16_t)sp;
@@ -579,7 +579,7 @@ void finalizarCalibracionBarrido() {
       }
     }
     uint16_t med_span = spans[barridos / 2];
-    for (int i = 2; i <= 13; i++) {
+    for (int i = 0; i < 16; i++) {
       if ((int)cal_max_mv[i] - (int)cal_min_mv[i] < 90) {
         cal_max_mv[i] = (uint16_t)min(4095, (int)cal_min_mv[i] + (int)med_span);
       }
@@ -593,26 +593,25 @@ void finalizarCalibracionBarrido() {
       prefs.end();
     }
     if (Serial.availableForWrite() >= 48) {
-      Serial.printf(">> [CAL] Barrido 12ch OK (%d/12 ch, span med=%u mV) y guardado en NVS.\n", barridos, med_span);
+      Serial.printf(">> [CAL] Barrido 16ch OK (%d/16 ch, span med=%u mV) y guardado en NVS.\n", barridos, med_span);
     }
   } else {
     usa_barrido = false;
-    uint16_t ord[12];
-    for (int i = 0; i < 12; i++) {
-      int pos = i + 2;
-      if (cal_min_mv[pos] <= cal_max_mv[pos]) {
-        base_mv[pos] = (uint16_t)(((uint32_t)cal_min_mv[pos] + (uint32_t)cal_max_mv[pos]) / 2UL);
+    uint16_t ord[16];
+    for (int i = 0; i < 16; i++) {
+      if (cal_min_mv[i] <= cal_max_mv[i]) {
+        base_mv[i] = (uint16_t)(((uint32_t)cal_min_mv[i] + (uint32_t)cal_max_mv[i]) / 2UL);
       }
-      ord[i] = base_mv[pos];
+      ord[i] = base_mv[i];
     }
-    for (int i = 0; i < 11; i++) {
-      for (int j = i + 1; j < 12; j++) {
+    for (int i = 0; i < 15; i++) {
+      for (int j = i + 1; j < 16; j++) {
         if (ord[j] < ord[i]) {
           uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
         }
       }
     }
-    calibrado_en_blanco = (ord[5] < 1000);
+    calibrado_en_blanco = (ord[7] < 1000);
     if (prefs.begin(NVS_NAMESPACE, false)) {
       prefs.putUChar("cal_ok", 0);
       prefs.end();

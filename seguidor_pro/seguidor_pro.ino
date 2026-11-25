@@ -63,10 +63,10 @@ const uint8_t  ESC_PWM_RES  = 14; // 0..16383 (~1.22 us/paso)
 #define PIN_GO        21  // Señal GO del módulo RRT (INPUT_PULLDOWN)
 #define PIN_BOOT_CAL   9  // Botón BOOT integrado ESP32-C3 (INPUT_PULLUP)
 
-// --- GEOMETRÍA EN V SIMÉTRICA 12 SENSORES ACTIVOS (I2=-750 .. I13=+750; I0,I1,I14,I15 enmascarados) ---
+// --- GEOMETRÍA EN V (L0=150 mm, alpha=22 deg, I0=-750 Izq .. I15=+750 Der) ---
 const int16_t PESOS_V[16] = {
-     0,    0, -750, -610, -470, -330, -195,  -65,
-    65,  195,  330,  470,  610,  750,    0,    0
+  -750, -649, -548, -447, -347, -249, -154, -62,
+    62,  154,  249,  347,  447,  548,  649,  750
 };
 
 // --- CONSTANTES CALIBRADAS POR SIMULACIÓN 7/7 PARA 500 Hz (dt = 2 ms, CERO Wi-Fi) ---
@@ -343,7 +343,7 @@ void leerSensores() {
       base_mv[pos] = lecturas_mv[pos];
     }
 
-    if (pos < 2 || pos > 13 || (!usa_barrido && base_mv[pos] < 60)) {
+    if (!usa_barrido && base_mv[pos] < 60) {
       norm_s[pos] = 0;
     } else if (usa_barrido) {
       int span = (int)cal_max_mv[pos] - (int)cal_min_mv[pos];
@@ -397,11 +397,11 @@ void calibrarBase() {
     base_mv[i] = (uint16_t)(acum[i] / 16);
   }
 
-  // Mediana de los 12 sensores activos (I2..I13) para detectar pista blanca vs aire
-  uint16_t ord[12];
-  for (int i = 0; i < 12; i++) ord[i] = base_mv[i + 2];
-  for (int i = 0; i < 11; i++) {
-    for (int j = i + 1; j < 12; j++) {
+  // Mediana de los 16 sensores (I0..I15) para detectar pista blanca vs aire
+  uint16_t ord[16];
+  for (int i = 0; i < 16; i++) ord[i] = base_mv[i];
+  for (int i = 0; i < 15; i++) {
+    for (int j = i + 1; j < 16; j++) {
       if (ord[j] < ord[i]) {
         uint16_t tmp = ord[i];
         ord[i] = ord[j];
@@ -411,15 +411,15 @@ void calibrarBase() {
   }
 
   int canales_bajos = 0;
-  for (int i = 2; i <= 13; i++) {
+  for (int i = 0; i < 16; i++) {
     if (base_mv[i] < 60) canales_bajos++;
   }
 
-  calibrado_en_blanco = (ord[5] < 1000);
-  uint16_t ref_info = ord[5];
+  calibrado_en_blanco = (ord[7] < 1000);
+  uint16_t ref_info = ord[7];
   serialWriteNB(calibrado_en_blanco
-                  ? ">> Modo: PISTA BLANCA 12ch (detecta linea negra).\n"
-                  : ">> Modo: AIRE 12ch (detecta papel blanco).\n");
+                  ? ">> Modo: PISTA BLANCA 16ch (detecta linea negra).\n"
+                  : ">> Modo: AIRE 16ch (detecta papel blanco).\n");
 
   // Reportar calibración por USB en líneas cortas no bloqueantes
   char buf[96];
@@ -476,9 +476,9 @@ void calibrarBarrido35s() {
     delay(4);
   }
 
-  uint16_t spans[12];
+  uint16_t spans[16];
   int barridos = 0;
-  for (int i = 2; i <= 13; i++) {
+  for (int i = 0; i < 16; i++) {
     int sp = (int)cal_max_mv[i] - (int)cal_min_mv[i];
     if (cal_min_mv[i] >= 60 && cal_min_mv[i] < 1600 && sp >= 90) {
       spans[barridos++] = (uint16_t)sp;
@@ -494,7 +494,7 @@ void calibrarBarrido35s() {
       }
     }
     uint16_t med_span = spans[barridos / 2];
-    for (int i = 2; i <= 13; i++) {
+    for (int i = 0; i < 16; i++) {
       if ((int)cal_max_mv[i] - (int)cal_min_mv[i] < 90) {
         cal_max_mv[i] = (uint16_t)min(4095, (int)cal_min_mv[i] + (int)med_span);
       }
@@ -507,25 +507,24 @@ void calibrarBarrido35s() {
       prefs.putBytes("cmax", cal_max_mv, sizeof(cal_max_mv));
       prefs.end();
     }
-    serialWriteNB(">> [CAL] Barrido 3.5s OK y guardado en NVS.\n");
+    serialWriteNB(">> [CAL] Barrido 16ch OK y guardado en NVS.\n");
   } else {
     usa_barrido = false;
-    uint16_t ord[12];
-    for (int i = 0; i < 12; i++) {
-      int pos = i + 2;
-      base_mv[pos] = (cal_min_mv[pos] <= cal_max_mv[pos])
-                       ? (uint16_t)(((uint32_t)cal_min_mv[pos] + (uint32_t)cal_max_mv[pos]) / 2UL)
-                       : base_mv[pos];
-      ord[i] = base_mv[pos];
+    uint16_t ord[16];
+    for (int i = 0; i < 16; i++) {
+      base_mv[i] = (cal_min_mv[i] <= cal_max_mv[i])
+                     ? (uint16_t)(((uint32_t)cal_min_mv[i] + (uint32_t)cal_max_mv[i]) / 2UL)
+                     : base_mv[i];
+      ord[i] = base_mv[i];
     }
-    for (int i = 0; i < 11; i++) {
-      for (int j = i + 1; j < 12; j++) {
+    for (int i = 0; i < 15; i++) {
+      for (int j = i + 1; j < 16; j++) {
         if (ord[j] < ord[i]) {
           uint16_t tmp = ord[i]; ord[i] = ord[j]; ord[j] = tmp;
         }
       }
     }
-    calibrado_en_blanco = (ord[5] < 1000);
+    calibrado_en_blanco = (ord[7] < 1000);
     if (prefs.begin("chavalin", false)) {
       prefs.putUChar("cal_ok", 0);
       prefs.end();
@@ -1013,10 +1012,10 @@ void setup() {
   // 6. Cargar parametros persistentes desde Flash NVS ("chavalin")
   cargarConfigNVS();
 
-  // 7. Restaurar barrido 12ch guardado en NVS (si existe) o autocalibración base
+  // 7. Restaurar barrido 16ch guardado en NVS (si existe) o autocalibración base
   if (usa_barrido) {
     leerSensores();
-    serialWriteNB(">> [NVS] Calibracion de barrido 12ch restaurada de Flash.\n");
+    serialWriteNB(">> [NVS] Calibracion de barrido 16ch restaurada de Flash.\n");
   } else {
     calibrarBase();
   }

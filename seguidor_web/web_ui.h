@@ -183,7 +183,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
 
     <div class="card">
-      <div class="card-title">12 SENSORES ACTIVOS I2..I13 (IZQ I0 &larr; &rarr; I15 DER; PUNTAS ATENUADAS)</div>
+      <div class="card-title">16 SENSORES ACTIVOS I0..I15 (IZQ I0 &larr; &rarr; I15 DER)</div>
       <div class="sensors-wrap">
         <div class="bars-container" id="barsContainer"></div>
         <div class="bar-labels" id="barLabels"></div>
@@ -230,10 +230,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   const barEls = [];
   const mvEls = [];
   for (let i = 0; i < 16; i++) {
-    const masked = (i < 2 || i > 13);
     const col = document.createElement('div');
     col.className = 'bar-col';
-    if (masked) col.style.opacity = '0.35';
     const fill = document.createElement('div');
     fill.className = 'bar-fill idle';
     fill.style.height = '5%';
@@ -243,12 +241,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     const lbl = document.createElement('div');
     lbl.textContent = 'I' + i;
-    if (masked) lbl.style.opacity = '0.35';
     barLabels.appendChild(lbl);
 
     const mv = document.createElement('div');
     mv.textContent = '----';
-    if (masked) mv.style.opacity = '0.35';
     barMvs.appendChild(mv);
     mvEls.push(mv);
   }
