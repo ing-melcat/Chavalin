@@ -132,7 +132,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
     <div class="actions">
       <button id="btnCal" onclick="sendCmd('calibrate')">Calibrar L&iacute;nea (3.5s)</button>
-      <button id="btnStart3" class="primary" onclick="startCountdown()">Salida 3s (Turbina)</button>
+      <button id="btnStart3" class="primary" onclick="startCountdown()">Salida 3s</button>
       <button id="btnRun" onclick="toggleRun()">Arrancar Ya</button>
       <button id="btnTurb" onclick="toggleTurb()">Turbina: OFF</button>
       <button onclick="sendCmd('test')">Test Motores</button>
@@ -158,8 +158,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="param-box"><label>Kp Base</label><input type="number" id="inKpBase" value="0.29" min="0" max="5" step="0.01"></div>
     <div class="param-box"><label>Kp Curva</label><input type="number" id="inKpCurva" value="0.50" min="0" max="5" step="0.01"></div>
     <div class="param-box"><label>Kd</label><input type="number" id="inKd" value="0.012" min="0" max="1" step="0.001"></div>
-    <div class="param-box"><label>Turbina (%)</label><input type="number" id="inTurb" value="40" min="0" max="100" step="1"></div>
-    <div class="param-box"><label>Turb Curva (%)</label><input type="number" id="inTurbC" value="60" min="0" max="100" step="1"></div>
+    <div class="param-box"><label>Turbina (%)</label><input type="number" id="inTurb" value="0" min="0" max="100" step="1"></div>
+    <div class="param-box"><label>Turb Curva (%)</label><input type="number" id="inTurbC" value="0" min="0" max="100" step="1"></div>
     <div class="param-box" style="justify-content:center; grid-column: span 1;">
       <div class="param-actions">
         <button id="btnApply" class="primary" style="flex:1;" onclick="applyPID()">Aplicar PID</button>
@@ -255,7 +255,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   let turbOn = false;
   let configLoaded = false;
   let cfgCache = {
-    pits: { vr: 142, vc: 62, kf: 160, kpb: 0.29, kpc: 0.50, kd: 0.012, tb: 40, tc: 60 },
+    pits: { vr: 95, vc: 58, kf: 160, kpb: 0.29, kpc: 0.50, kd: 0.012, tb: 0, tc: 0 },
     comp: { vr: 150, vc: 68, kf: 195, kpb: 0.34, kpc: 0.58, kd: 0.015, tb: 40, tc: 60 }
   };
 
@@ -266,8 +266,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   function updateSyncBanner() {
     const p = cfgCache.pits || {};
-    const tbRace = Math.max(20, Number(p.tb || 0));
-    const tcRace = Math.max(tbRace, Number(p.tc || 0));
+    const tbRace = Math.max(0, Number(p.tb || 0));
+    const tcRace = (tbRace === 0) ? 0 : Math.max(tbRace, Number(p.tc || 0));
     document.getElementById('raceSyncBox').textContent =
       `Listo para Carrera Oficial (seguidor_pro Cero Wi-Fi — guardado auto en Flash NVS): ` +
       `vr=${p.vr} vc=${p.vc} kf=${p.kf} kpb=${Number(p.kpb).toFixed(3)} kpc=${Number(p.kpc).toFixed(3)} ` +
@@ -367,7 +367,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
 
       document.getElementById('connDot').className = 'dot online';
-      document.getElementById('connText').textContent = `Conectado a ESP32-C3 (Lazo ${d.dt || 12} ms / NVS Activo)`;
+      document.getElementById('connText').textContent = `Conectado a ESP32-C3 (Lazo ${d.dt || 4} ms / NVS Activo)`;
 
       running = !!d.run;
       countdownActive = (d.cd || 0) > 0;
@@ -387,7 +387,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         btnStart3.textContent = `Cancelar (${(d.cd / 10).toFixed(1)}s)`;
         btnStart3.className = 'danger';
       } else {
-        btnStart3.textContent = 'Salida 3s (Turbina)';
+        btnStart3.textContent = 'Salida 3s';
         btnStart3.className = running ? '' : 'primary';
       }
 
@@ -428,7 +428,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       histE.push(Math.max(-255, Math.min(255, d.err / 3))); histE.shift();
       drawChart();
 
-      if (running) nextDelay = 250;
+      if (running) nextDelay = 600;
     } catch (e) {
       clearTimeout(timer);
       document.getElementById('connDot').className = 'dot';

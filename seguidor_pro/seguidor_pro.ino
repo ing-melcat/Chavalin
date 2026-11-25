@@ -88,10 +88,13 @@ const float    DEFAULT_KD_PHYS      = 0.014f;                   // Equiv. discre
 const float    TAU_D                = 0.008f;
 const float    ALPHA_D              = DT_S / (TAU_D + DT_S);    // 0.20f @ 2 ms
 
-const int      DEFAULT_TURB_BASE_PCT  = 50;
-const int      DEFAULT_TURB_CURVA_PCT = 80;
+const int      DEFAULT_TURB_BASE_PCT  = 0;
+const int      DEFAULT_TURB_CURVA_PCT = 0;
 const float    TAU_TURB_DECAY         = 0.16f;
 const float    TURB_RAMPA_S           = 0.20f;                  // Rampa suave al activar (0% -> tb en 200 ms)
+const float    MOT_RAMPA_S            = 0.35f;                  // Curva suave de aceleración inicial (350 ms)
+const float    MOT_SLEW_PWM_S         = 2800.0f;                // Límite slew-rate ágil (~35 ms) + paso por 0
+const float    TURB_SLEW_PCT_S        = 250.0f;                 // Límite de subida de turbina (%/s) en curva
 
 struct ConfigPID {
   int   vel_recta;
@@ -131,13 +134,17 @@ EstadoRobot estado = DETENIDO;
 uint8_t  go_high_count = 0;
 bool     go_bloqueado_hasta_low = false;
 
-bool     freno_activo = false;
+uint8_t  freno_fase = 0;       // 0=inactivo, 1=coast 50ms anti-pico, 2=freno 150ms
 uint32_t freno_fin_ms = 0;
+uint32_t todo_oscuro_ms = 0;
 bool     cuenta_salida_activa = false;
 uint32_t cuenta_salida_fin_ms = 0;
 
 int      motor_L = 0;
 int      motor_R = 0;
+float    mot_rampa = 0.0f;
+float    mot_cmd_L = 0.0f;
+float    mot_cmd_R = 0.0f;
 
 float    error_actual = 0.0f;
 float    error_anterior = 0.0f;
@@ -178,9 +185,9 @@ void normalizarConfig() {
   cfg.k_freno        = constrain(cfg.k_freno, 0, 400);
   cfg.kp_base        = clampf(cfg.kp_base, 0.05f, 2.0f);
   cfg.kp_curva       = clampf(cfg.kp_curva, 0.0f, 3.0f);
-  cfg.kd_phys        = clampf(cfg.kd_phys, 0.0f, 0.10f);
-  cfg.turb_base_pct  = constrain(cfg.turb_base_pct, 20, 100);
-  cfg.turb_curva_pct = constrain(cfg.turb_curva_pct, 20, 100);
+  cfg.kd_phys        = clampf(cfg.kd_phys, 0.0f, 0.50f);
+  cfg.turb_base_pct  = constrain(cfg.turb_base_pct, 0, 100);
+  cfg.turb_curva_pct = constrain(cfg.turb_curva_pct, 0, 100);
 }
 
 void restaurarDefaultsConfig() {
@@ -260,12 +267,13 @@ void imprimirConfigSerial() {
 void setMotorA(int speed) {
   speed = constrain(speed, -255, 255);
   motor_L = speed;
+  // Motor A (Izq) tiene polaridad física invertida en cableado: adelante = AI2 PWM
   if (speed > 0) {
-    ledcWrite(PIN_MOT_A1, speed);
-    ledcWrite(PIN_MOT_A2, 0);
-  } else if (speed < 0) {
     ledcWrite(PIN_MOT_A1, 0);
-    ledcWrite(PIN_MOT_A2, -speed);
+    ledcWrite(PIN_MOT_A2, speed);
+  } else if (speed < 0) {
+    ledcWrite(PIN_MOT_A1, -speed);
+    ledcWrite(PIN_MOT_A2, 0);
   } else {
     ledcWrite(PIN_MOT_A1, 0);
     ledcWrite(PIN_MOT_A2, 0);
@@ -292,8 +300,22 @@ void setMotors(int speedA, int speedB) {
   setMotorB(speedB);
 }
 
+static inline float slewUnMotor(float actual, float meta, float dt_s) {
+  if ((actual > 1.0f && meta < 0.0f) || (actual < -1.0f && meta > 0.0f)) {
+    meta = 0.0f; // Paso obligatorio por 0 antes de invertir polaridad
+  }
+  float max_step = MOT_SLEW_PWM_S * dt_s;
+  float diff = meta - actual;
+  if (diff > max_step)  return actual + max_step;
+  if (diff < -max_step) return actual - max_step;
+  return meta;
+}
+
 void stopMotors() {
   setMotors(0, 0);
+  mot_rampa = 0.0f;
+  mot_cmd_L = 0.0f;
+  mot_cmd_R = 0.0f;
 }
 
 void brakeMotors() {
@@ -569,7 +591,11 @@ float calcularErrorLinea(bool en_carrera) {
 // -----------------------------------------------------------------------------
 void iniciarCarrera(EstadoRobot nuevo_estado) {
   bool ya_preramp = (!cuenta_salida_activa && turb_cmd >= (float)cfg.turb_base_pct * 0.8f);
-  freno_activo = false;
+  freno_fase = 0;
+  todo_oscuro_ms = 0;
+  mot_rampa = 0.0f;
+  mot_cmd_L = 0.0f;
+  mot_cmd_R = 0.0f;
   cuenta_salida_activa = false;
   estado = nuevo_estado;
   d_filt = 0.0f;
@@ -593,17 +619,18 @@ void iniciarCarrera(EstadoRobot nuevo_estado) {
 }
 
 void detenerPorJuez() {
-  brakeMotors();
+  stopMotors(); // Coast (0,0) primero para disipar corriente inductiva sin picos en VM
   setTurbina(0.0f);
   estado = DETENIDO;
   cuenta_salida_activa = false;
-  freno_activo = true;
-  freno_fin_ms = millis() + 300;
+  todo_oscuro_ms = 0;
+  freno_fase = 1;
+  freno_fin_ms = millis() + 50UL;
   d_filt = 0.0f;
   u_slow = 0.0f;
   turb_cmd = 0.0f;
   turbina_rampa_done = false;
-  serialWriteNB(">> [COMPETENCIA] GO LOW -> Freno inmediato + Turbina 0%.\n");
+  serialWriteNB(">> [COMPETENCIA] Paro seguro (coast+freno) + Turbina 0%.\n");
 }
 
 void detenerBanco() {
@@ -611,7 +638,8 @@ void detenerBanco() {
   setTurbina(0.0f);
   estado = DETENIDO;
   cuenta_salida_activa = false;
-  freno_activo = false;
+  freno_fase = 0;
+  todo_oscuro_ms = 0;
   d_filt = 0.0f;
   u_slow = 0.0f;
   turb_cmd = 0.0f;
@@ -619,39 +647,67 @@ void detenerBanco() {
 }
 
 void ejecutarControlPID500Hz() {
+  // Protección: si 13+ sensores leen alto (>650) por 250 ms (robot levantado/fuera de pista), cortar
+  int cnt_altos = 0;
+  for (int i = 0; i < 16; i++) {
+    if (norm_s[i] > 650) cnt_altos++;
+  }
+  if (cnt_altos >= 13) {
+    if (todo_oscuro_ms == 0) {
+      todo_oscuro_ms = millis();
+    } else if ((uint32_t)(millis() - todo_oscuro_ms) >= 250UL) {
+      detenerBanco();
+      serialWriteNB(">> [PROTECCION] Robot levantado / fuera de pista -> Paro seguro.\n");
+      return;
+    }
+  } else {
+    todo_oscuro_ms = 0;
+  }
+
   // 1. Ganancia cuadrática y D filtrada invariante a dt_s (tau_d = 0.008 s)
   float u_err = fminf(1.0f, fabsf(error_actual) / 750.0f);
   float kp_din = cfg.kp_base + cfg.kp_curva * (u_err * u_err);
   float de_dt = (error_actual - error_anterior) / DT_S;
   d_filt = ALPHA_D * de_dt + (1.0f - ALPHA_D) * d_filt;
 
-  float pid_raw = kp_din * error_actual + cfg.kd_phys * d_filt;
-  float salida_pid = clampf(pid_raw, -MAX_PID, MAX_PID);
+  float pid_cap    = fminf(MAX_PID, (float)cfg.vel_recta * 1.15f + 20.0f);
+  float pid_raw    = kp_din * error_actual + cfg.kd_phys * d_filt;
+  float salida_pid = clampf(pid_raw, -pid_cap, pid_cap);
 
-  // 2. Freno predictivo en entrada brusca a horquilla (tau_slow = 0.13 s)
+  // 2. Freno predictivo en entrada brusca a horquilla escalado a vel_recta
   u_slow += ALPHA_SLOW * (u_err - u_slow);
-  float u_jump = fmaxf(0.0f, u_err - u_slow);
-  float vel_base = fmaxf((float)cfg.vel_curva_min, (float)cfg.vel_recta - (float)cfg.k_freno * u_err);
-  float vel_din = fmaxf(BRAKE_CAP, vel_base - K_FRENO_DYN * (float)cfg.k_freno * u_jump);
+  float u_jump      = fmaxf(0.0f, u_err - u_slow);
+  float brake_floor = -fminf(85.0f, (float)cfg.vel_recta * 0.65f);
+  float vel_base    = fmaxf((float)cfg.vel_curva_min, (float)cfg.vel_recta - (float)cfg.k_freno * u_err);
+  float vel_din     = fmaxf(brake_floor, vel_base - K_FRENO_DYN * (float)cfg.k_freno * u_jump);
 
-  // 3. Mezcla diferencial TB6612 (Motor A Izq +pid, Motor B Der -pid)
-  int pwm_A = constrain((int)lroundf(vel_din + salida_pid), -255, 255);
-  int pwm_B = constrain((int)lroundf(vel_din - salida_pid), -255, 255);
-  setMotors(pwm_A, pwm_B);
+  // 3. Curva de arranque (350 ms) + slew-rate con paso obligatorio por 0
+  mot_rampa = fminf(1.0f, mot_rampa + DT_S / MOT_RAMPA_S);
+  int pwm_max_fwd = min(230, max(cfg.vel_recta + 35, cfg.vel_curva_min + 35));
+  int pwm_min_rev = -(int)lroundf(fminf(85.0f, (float)cfg.vel_recta * 0.70f));
 
-  // 4. Turbina EDF siempre activa durante la carrera:
-  //    Rampa suave al activar (0 -> tb en 200 ms),
-  //    luego ataque inmediato al subir y decaimiento exponencial de 160 ms al salir de curva.
-  float turb_tgt = (float)cfg.turb_base_pct + (float)(cfg.turb_curva_pct - cfg.turb_base_pct) * u_err;
-  if (!turbina_rampa_done) {
-    turb_cmd += (float)cfg.turb_base_pct * (DT_S / TURB_RAMPA_S);
+  float tgt_A = clampf((vel_din + salida_pid) * mot_rampa, (float)pwm_min_rev, (float)pwm_max_fwd);
+  float tgt_B = clampf((vel_din - salida_pid) * mot_rampa, (float)pwm_min_rev, (float)pwm_max_fwd);
+
+  mot_cmd_L = slewUnMotor(mot_cmd_L, tgt_A, DT_S);
+  mot_cmd_R = slewUnMotor(mot_cmd_R, tgt_B, DT_S);
+  setMotors((int)lroundf(mot_cmd_L), (int)lroundf(mot_cmd_R));
+
+  // 4. Turbina EDF (0% si está desactivada, o rampa suave y subida limitada si > 0%):
+  int t_curva = (cfg.turb_base_pct == 0) ? 0 : max(cfg.turb_base_pct, cfg.turb_curva_pct);
+  float turb_tgt = (float)cfg.turb_base_pct + (float)(t_curva - cfg.turb_base_pct) * u_err;
+  if (turb_tgt <= 0.0f) {
+    turb_cmd = 0.0f;
+    turbina_rampa_done = true;
+  } else if (!turbina_rampa_done) {
+    turb_cmd += (float)max(cfg.turb_base_pct, 1) * (DT_S / TURB_RAMPA_S);
     if (turb_cmd >= turb_tgt) {
       turb_cmd = turb_tgt;
       turbina_rampa_done = true;
     }
   } else {
     if (turb_tgt >= turb_cmd) {
-      turb_cmd = turb_tgt;
+      turb_cmd = fminf(turb_tgt, turb_cmd + TURB_SLEW_PCT_S * DT_S);
     } else {
       static const float kTurbDecay = expf(-DT_S / TAU_TURB_DECAY);
       turb_cmd = turb_tgt + (turb_cmd - turb_tgt) * kTurbDecay;
@@ -663,9 +719,23 @@ void ejecutarControlPID500Hz() {
 // -----------------------------------------------------------------------------
 // RUTINAS DE BANCO POR USB SERIAL (NO BLOQUEANTE EN LOOP)
 // -----------------------------------------------------------------------------
+void rampaBancoMotores(int tgtA, int tgtB, uint32_t hold_ms) {
+  for (int i = 1; i <= 6; i++) {
+    setMotors((tgtA * i) / 6, (tgtB * i) / 6);
+    delay(25);
+  }
+  delay(hold_ms);
+  for (int i = 4; i >= 0; i--) {
+    setMotors((tgtA * i) / 5, (tgtB * i) / 5);
+    delay(25);
+  }
+  stopMotors();
+  delay(300);
+}
+
 void ejecutarTestMotores() {
   detenerBanco();
-  serialWriteNB(">> [TEST MOTORES] Iniciando secuencia en 3 s...\n");
+  serialWriteNB(">> [TEST MOTORES] Iniciando secuencia suave en 3 s...\n");
   delay(1000);
   serialWriteNB(">> 2...\n");
   delay(1000);
@@ -673,33 +743,20 @@ void ejecutarTestMotores() {
   delay(1000);
 
   serialWriteNB(">> 1/5 Motor A (Izq) adelante...\n");
-  setMotors(130, 0);
-  delay(1000);
-  stopMotors();
-  delay(300);
+  rampaBancoMotores(130, 0, 700);
 
   serialWriteNB(">> 2/5 Motor B (Der) adelante...\n");
-  setMotors(0, 130);
-  delay(1000);
-  stopMotors();
-  delay(300);
+  rampaBancoMotores(0, 130, 700);
 
   serialWriteNB(">> 3/5 Ambos adelante...\n");
-  setMotors(100, 100);
-  delay(1000);
-  stopMotors();
-  delay(300);
+  rampaBancoMotores(100, 100, 700);
 
   serialWriteNB(">> 4/5 Ambos reversa...\n");
-  setMotors(-100, -100);
-  delay(1000);
-  stopMotors();
-  delay(300);
+  rampaBancoMotores(-100, -100, 700);
 
   serialWriteNB(">> 5/5 Giro eje (Izq)...\n");
-  setMotors(-100, 100);
-  delay(700);
-  stopMotors();
+  rampaBancoMotores(-100, 100, 450);
+
   serialWriteNB(">> [TEST MOTORES] Completado.\n");
   last_loop_us = micros();
 }
@@ -776,18 +833,14 @@ void ejecutarComandoSerial(const char* raw) {
         break;
       case '1':
         detenerBanco();
-        serialWriteNB(">> Motor A (Izq) adelante 1 s...\n");
-        setMotorA(120);
-        delay(1000);
-        stopMotors();
+        serialWriteNB(">> Motor A (Izq) adelante suave 1 s...\n");
+        rampaBancoMotores(120, 0, 700);
         last_loop_us = micros();
         break;
       case '2':
         detenerBanco();
-        serialWriteNB(">> Motor B (Der) adelante 1 s...\n");
-        setMotorB(120);
-        delay(1000);
-        stopMotors();
+        serialWriteNB(">> Motor B (Der) adelante suave 1 s...\n");
+        rampaBancoMotores(0, 120, 700);
         last_loop_us = micros();
         break;
       default:
@@ -1041,12 +1094,14 @@ void loop() {
     detenerPorJuez();
   }
 
-  // Liberar freno dinámico tras 300 ms en estado detenido
-  if (freno_activo && (int32_t)(now_ms - freno_fin_ms) >= 0) {
-    freno_activo = false;
-    if (estado == DETENIDO) {
-      stopMotors();
-    }
+  // Freno en 2 fases anti-pico: 50 ms coast (0,0) -> 150 ms freno activo -> stop
+  if (freno_fase == 1 && (int32_t)(now_ms - freno_fin_ms) >= 0) {
+    if (estado == DETENIDO) brakeMotors();
+    freno_fase = 2;
+    freno_fin_ms = now_ms + 150UL;
+  } else if (freno_fase == 2 && (int32_t)(now_ms - freno_fin_ms) >= 0) {
+    freno_fase = 0;
+    if (estado == DETENIDO) stopMotors();
   }
 
   // Procesar comandos USB Serial (no bloqueante)

@@ -68,11 +68,14 @@ const float TAU_D          = 0.008f;  // Filtro derivativo (alpha_d = dt / (TAU_
 const float TAU_SLOW       = 0.13f;   // Envolvente predictiva de entrada a horquilla
 const float TAU_TURB_DECAY = 0.16f;   // Decaimiento 160 ms de turbina al salir de curva
 const float TURB_RAMPA_S   = 0.20f;   // Rampa suave al activar turbina (200 ms)
+const float MOT_RAMPA_S    = 0.35f;   // Curva suave de aceleración inicial (350 ms)
+const float MOT_SLEW_PWM_S = 2800.0f; // Límite slew-rate ágil (~35 ms) + paso obligatorio por 0
+const float TURB_SLEW_PCT_S = 250.0f; // Límite de subida de turbina (%/s) en curva
 const float MAX_PID        = 160.0f;  // Saturación de salida diferencial PID
 
-const uint32_t LOOP_US_PITS = 12000UL; // 83.3 Hz (Wi-Fi ON)
-const uint32_t LOOP_US_COMP = 2000UL;  // 500 Hz  (Wi-Fi OFF)
-const float    DT_PITS_S    = 0.012f;
+const uint32_t LOOP_US_PITS = 4000UL;  // 250 Hz (Wi-Fi ON, bajo jitter)
+const uint32_t LOOP_US_COMP = 2000UL;  // 500 Hz (Wi-Fi OFF)
+const float    DT_PITS_S    = 0.004f;
 const float    DT_COMP_S    = 0.002f;
 
 struct PidConfig {
@@ -90,7 +93,7 @@ struct PidConfig {
 
 // Constantes calibradas por @sim-math para 12 ms (Pits) y 2 ms (Competencia)
 const PidConfig PITS_DEF = {
-  142, 62, 160, 3.1f, -195.0f, 0.29f, 0.50f, 0.012f, 40, 60
+  95, 58, 160, 3.1f, -195.0f, 0.29f, 0.50f, 0.012f, 0, 0
 };
 const PidConfig COMP_DEF = {
   150, 68, 195, 3.0f, -200.0f, 0.34f, 0.58f, 0.015f, 40, 60
@@ -134,8 +137,9 @@ volatile bool calibrar_pendiente     = false;
 
 uint32_t cuenta_fin_ms   = 0;
 bool     turbina_rampa_done = false;
-bool     freno_activo    = false;
+uint8_t  freno_fase      = 0;       // 0=inactivo, 1=coast 50ms anti-pico, 2=freno 150ms
 uint32_t freno_fin_ms    = 0;
+uint32_t todo_oscuro_ms  = 0;
 
 int   turbina_pct    = 0;
 float turb_cmd       = 0.0f;
@@ -143,6 +147,9 @@ float error_actual   = 0.0f;
 float error_anterior = 0.0f;
 float d_filt         = 0.0f;
 float u_slow         = 0.0f;
+float mot_rampa      = 0.0f;
+float mot_cmd_L      = 0.0f;
+float mot_cmd_R      = 0.0f;
 int   motor_L        = 0;
 int   motor_R        = 0;
 
@@ -154,12 +161,13 @@ uint32_t lastLoopUs  = 0;
 void setMotorA(int speed) {
   speed = constrain(speed, -255, 255);
   motor_L = speed;
+  // Motor A (Izq) tiene polaridad física invertida en cableado: adelante = AI2 PWM
   if (speed > 0) {
-    ledcWrite(PIN_MOT_A1, speed);
-    ledcWrite(PIN_MOT_A2, 0);
-  } else if (speed < 0) {
     ledcWrite(PIN_MOT_A1, 0);
-    ledcWrite(PIN_MOT_A2, -speed);
+    ledcWrite(PIN_MOT_A2, speed);
+  } else if (speed < 0) {
+    ledcWrite(PIN_MOT_A1, -speed);
+    ledcWrite(PIN_MOT_A2, 0);
   } else {
     ledcWrite(PIN_MOT_A1, 0);
     ledcWrite(PIN_MOT_A2, 0);
@@ -186,8 +194,22 @@ void setMotors(int sL, int sR) {
   setMotorB(sR);
 }
 
+static inline float slewUnMotor(float actual, float meta, float dt_s) {
+  if ((actual > 1.0f && meta < 0.0f) || (actual < -1.0f && meta > 0.0f)) {
+    meta = 0.0f; // Paso obligatorio por 0 antes de invertir polaridad
+  }
+  float max_step = MOT_SLEW_PWM_S * dt_s;
+  float diff = meta - actual;
+  if (diff > max_step)  return actual + max_step;
+  if (diff < -max_step) return actual - max_step;
+  return meta;
+}
+
 void stopMotors() {
   setMotors(0, 0);
+  mot_cmd_L = 0.0f;
+  mot_cmd_R = 0.0f;
+  mot_rampa = 0.0f;
   d_filt = 0.0f;
   u_slow = 0.0f;
   error_anterior = 0.0f;
@@ -222,7 +244,8 @@ void detenerTodo() {
   calibracion_barrido_activa = false;
   turbina_manual = false;
   turbina_rampa_done = false;
-  freno_activo = false;
+  freno_fase = 0;
+  todo_oscuro_ms = 0;
   stopMotors();
   setTurbina(0);
   turb_cmd = 0.0f;
@@ -235,23 +258,24 @@ void detenerConFreno() {
   calibracion_barrido_activa = false;
   turbina_manual = false;
   turbina_rampa_done = false;
+  todo_oscuro_ms = 0;
   setTurbina(0);
   turb_cmd = 0.0f;
-  d_filt = 0.0f;
-  u_slow = 0.0f;
-  error_anterior = 0.0f;
+  stopMotors(); // Coast (0,0) primero para disipar corriente inductiva sin picos en VM
   if (estaba_corriendo) {
-    brakeMotors();
-    freno_activo = true;
-    freno_fin_ms = millis() + 220UL;
+    freno_fase = 1;
+    freno_fin_ms = millis() + 50UL;
   } else {
-    freno_activo = false;
-    stopMotors();
+    freno_fase = 0;
   }
 }
 
 void iniciarCarrera(bool competencia) {
-  freno_activo = false;
+  freno_fase = 0;
+  todo_oscuro_ms = 0;
+  mot_rampa = 0.0f;
+  mot_cmd_L = 0.0f;
+  mot_cmd_R = 0.0f;
   cuenta_regresiva_activa = false;
   PidConfig cfg;
   portENTER_CRITICAL(&stateMux);
@@ -294,17 +318,31 @@ void apagarRadioWiFi() {
   wifi_apagado = true;
 }
 
+void rampaBancoMotores(int tgtA, int tgtB, uint32_t hold_ms) {
+  for (int i = 1; i <= 6; i++) {
+    setMotors((tgtA * i) / 6, (tgtB * i) / 6);
+    delay(25);
+  }
+  delay(hold_ms);
+  for (int i = 4; i >= 0; i--) {
+    setMotors((tgtA * i) / 5, (tgtB * i) / 5);
+    delay(25);
+  }
+  stopMotors();
+  delay(300);
+}
+
 void ejecutarTestMotores() {
   detenerTodo();
-  Serial.println(">> [TEST MOTORES] Iniciando prueba (Izq, Der, Adelante, Reversa)...");
-  Serial.println(">> [TEST MOTORES] Motor IZQ adelante (+110, 600 ms)");
-  setMotors(110, 0);     delay(600);
-  Serial.println(">> [TEST MOTORES] Motor DER adelante (+110, 600 ms)");
-  setMotors(0, 110);     delay(600);
-  Serial.println(">> [TEST MOTORES] Ambos adelante (+100, 600 ms)");
-  setMotors(100, 100);   delay(600);
-  Serial.println(">> [TEST MOTORES] Ambos reversa (-100, 600 ms)");
-  setMotors(-100, -100); delay(600);
+  Serial.println(">> [TEST MOTORES] Prueba suave anti-picos (Izq, Der, Adelante, Reversa)...");
+  Serial.println(">> [TEST MOTORES] Motor IZQ adelante (+110)");
+  rampaBancoMotores(110, 0, 450);
+  Serial.println(">> [TEST MOTORES] Motor DER adelante (+110)");
+  rampaBancoMotores(0, 110, 450);
+  Serial.println(">> [TEST MOTORES] Ambos adelante (+100)");
+  rampaBancoMotores(100, 100, 450);
+  Serial.println(">> [TEST MOTORES] Ambos reversa (-100)");
+  rampaBancoMotores(-100, -100, 450);
   stopMotors();
   Serial.println(">> [TEST MOTORES] Motores detenidos.");
   lastLoopUs = micros();
@@ -346,6 +384,17 @@ void cargarConfigNVS() {
     p.kd_phys           = readNvsFloatSafe(prefs, "p_kd",  PITS_DEF.kd_phys);
     p.turbina_base_pct  = constrain(prefs.getInt("p_tb",  PITS_DEF.turbina_base_pct), 0, 100);
     p.turbina_curva_pct = constrain(prefs.getInt("p_tc",  PITS_DEF.turbina_curva_pct), p.turbina_base_pct, 100);
+
+    // Migración única: iniciar con turbina desactivada (0/0%) hasta que el usuario la active en la Web
+    if (prefs.getUChar("t_off1", 0) == 0) {
+      p.turbina_base_pct  = 0;
+      p.turbina_curva_pct = 0;
+      prefs.putInt("p_tb", 0);
+      prefs.putInt("p_tc", 0);
+      prefs.putInt("tb", 0);
+      prefs.putInt("tc", 0);
+      prefs.putUChar("t_off1", 1);
+    }
 
     c.vel_recta         = constrain(prefs.getInt("c_vr",  COMP_DEF.vel_recta), 0, 255);
     c.vel_curva         = constrain(prefs.getInt("c_vc",  COMP_DEF.vel_curva), 0, 255);
@@ -402,8 +451,8 @@ bool guardarConfigNVS() {
   prefs.putInt("c_tc",   c.turbina_curva_pct);
 
   // Sincronización directa con seguidor_pro.ino (firmware oficial Cero Wi-Fi)
-  int pro_tb = constrain(max(20, p.turbina_base_pct), 20, 100);
-  int pro_tc = constrain(max(pro_tb, p.turbina_curva_pct), 20, 100);
+  int pro_tb = constrain(p.turbina_base_pct, 0, 100);
+  int pro_tc = (pro_tb == 0) ? 0 : constrain(max(pro_tb, p.turbina_curva_pct), 0, 100);
   prefs.putInt("vr",    p.vel_recta);
   prefs.putInt("vc",    p.vel_curva);
   prefs.putInt("kf",    p.k_freno);
@@ -686,7 +735,7 @@ static esp_err_t handleData(httpd_req_t *req) {
     cd_tenths,
     cal_tenths,
     cal_mode,
-    comp ? 2 : 12,
+    comp ? 2 : 4,
     t_on ? "true" : "false",
     t_pct,
     err, mL, mR,
@@ -890,20 +939,19 @@ void procesarEntradasFisicas(uint32_t nowUs) {
 // SETUP & LOOP
 // -----------------------------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
-  Serial.setTxTimeoutMs(0); // Evita bloqueo USB CDC si nadie lee COM5
-  delay(800);
-
-  // Motores TB6612 @ 20 kHz, 8 bits
+  // Apagar motores y armar ESC ANTES de cualquier delay para minimizar el tirón al encender
   ledcAttach(PIN_MOT_A1, PWM_FREQ, PWM_RES);
   ledcAttach(PIN_MOT_A2, PWM_FREQ, PWM_RES);
   ledcAttach(PIN_MOT_B1, PWM_FREQ, PWM_RES);
   ledcAttach(PIN_MOT_B2, PWM_FREQ, PWM_RES);
   stopMotors();
 
-  // Turbina ESC @ 50 Hz, 14 bits (armado seguro a 1000 us)
   ledcAttach(PIN_TURBINA, ESC_PWM_FREQ, ESC_PWM_RES);
   setTurbina(0);
+
+  Serial.begin(115200);
+  Serial.setTxTimeoutMs(0); // Evita bloqueo USB CDC si nadie lee COM5
+  delay(800);
 
   // Entradas físicas: Receptor del Juez (RRT) y Botón BOOT
   pinMode(PIN_GO, INPUT_PULLDOWN);
@@ -965,9 +1013,13 @@ void loop() {
   // 1. Verificar botón físico BOOT (GPIO 21 PIN_GO deshabilitado en modo Web)
   procesarEntradasFisicas(nowUs);
 
-  // Liberar freno activo no bloqueante tras 220 ms
-  if (freno_activo && (int32_t)(millis() - freno_fin_ms) >= 0) {
-    freno_activo = false;
+  // Freno en 2 fases anti-pico: 50 ms coast (0,0) -> 150 ms freno activo -> stop
+  if (freno_fase == 1 && (int32_t)(millis() - freno_fin_ms) >= 0) {
+    brakeMotors();
+    freno_fase = 2;
+    freno_fin_ms = millis() + 150UL;
+  } else if (freno_fase == 2 && (int32_t)(millis() - freno_fin_ms) >= 0) {
+    freno_fase = 0;
     stopMotors();
   }
 
@@ -1005,7 +1057,7 @@ void loop() {
   if (cmd_start3_pendiente) {
     cmd_start3_pendiente = false;
     if (!seguidor_activo && !calibracion_barrido_activa) {
-      freno_activo = false;
+      freno_fase = 0;
       stopMotors();
       turbina_manual = false;
       turb_cmd = 0.0f;
@@ -1053,52 +1105,81 @@ void loop() {
       lastLoopUs += periodUs;
     }
 
-    leerSensores(modo_competencia);
+    leerSensores(modo_competencia || seguidor_activo);
     error_actual = calcularErrorLinea();
 
     if (seguidor_activo) {
-      PidConfig cfg;
-      portENTER_CRITICAL(&stateMux);
-      cfg = modo_competencia ? cfg_comp : cfg_pits;
-      portEXIT_CRITICAL(&stateMux);
-
-      float dt_s = modo_competencia ? DT_COMP_S : DT_PITS_S;
-      float u_err = fminf(1.0f, fabsf(error_actual) / 750.0f);
-      float kp_din = cfg.kp_base + cfg.kp_curva * (u_err * u_err);
-
-      float alpha_d = dt_s / (TAU_D + dt_s);
-      float de_dt = (error_actual - error_anterior) / dt_s;
-      d_filt = alpha_d * de_dt + (1.0f - alpha_d) * d_filt;
-
-      float salida_pid = constrain(kp_din * error_actual + cfg.kd_phys * d_filt, -MAX_PID, MAX_PID);
-
-      float alpha_slow = dt_s / (TAU_SLOW + dt_s);
-      u_slow += alpha_slow * (u_err - u_slow);
-      float u_jump = fmaxf(0.0f, u_err - u_slow);
-      float vel_base = fmaxf((float)cfg.vel_curva, (float)cfg.vel_recta - (float)cfg.k_freno * u_err);
-      float vel_din  = fmaxf(cfg.brake_cap, vel_base - cfg.k_freno_dyn * (float)cfg.k_freno * u_jump);
-
-      int pwm_A = constrain((int)lroundf(vel_din + salida_pid), -255, 255);
-      int pwm_B = constrain((int)lroundf(vel_din - salida_pid), -255, 255);
-      setMotors(pwm_A, pwm_B);
-
-      int t_base = cfg.turbina_base_pct;
-      if (modo_competencia && t_base < 20) t_base = COMP_DEF.turbina_base_pct;
-      int t_curva = (t_base == 0 && !modo_competencia) ? 0 : max(t_base, cfg.turbina_curva_pct);
-
-      float turb_tgt = (float)t_base + (float)(t_curva - t_base) * u_err;
-      if (!turbina_rampa_done) {
-        turb_cmd += (float)max(t_base, 1) * (dt_s / TURB_RAMPA_S);
-        if (turb_cmd >= (float)t_base) {
-          turb_cmd = (float)t_base;
-          turbina_rampa_done = true;
-        }
-      } else if (turb_tgt >= turb_cmd) {
-        turb_cmd = turb_tgt;
-      } else {
-        turb_cmd = turb_tgt + (turb_cmd - turb_tgt) * expf(-dt_s / TAU_TURB_DECAY);
+      // Protección: si 13+ sensores leen alto (>650) por 250 ms (robot levantado/fuera de pista), cortar
+      int cnt_altos = 0;
+      for (int i = 0; i < 16; i++) {
+        if (norm_s[i] > 650) cnt_altos++;
       }
-      setTurbinaFloat(turb_cmd);
+      if (cnt_altos >= 13) {
+        if (todo_oscuro_ms == 0) {
+          todo_oscuro_ms = millis();
+        } else if ((uint32_t)(millis() - todo_oscuro_ms) >= 250UL) {
+          detenerTodo();
+          if (Serial.availableForWrite() >= 64) {
+            Serial.println(">> [PROTECCION] Robot levantado / fuera de pista -> Paro seguro.");
+          }
+        }
+      } else {
+        todo_oscuro_ms = 0;
+      }
+
+      if (seguidor_activo) {
+        PidConfig cfg;
+        portENTER_CRITICAL(&stateMux);
+        cfg = modo_competencia ? cfg_comp : cfg_pits;
+        portEXIT_CRITICAL(&stateMux);
+
+        float dt_s = modo_competencia ? DT_COMP_S : DT_PITS_S;
+        float u_err = fminf(1.0f, fabsf(error_actual) / 750.0f);
+        float kp_din = cfg.kp_base + cfg.kp_curva * (u_err * u_err);
+
+        float alpha_d = dt_s / (TAU_D + dt_s);
+        float de_dt = (error_actual - error_anterior) / dt_s;
+        d_filt = alpha_d * de_dt + (1.0f - alpha_d) * d_filt;
+
+        float pid_cap     = fminf(MAX_PID, (float)cfg.vel_recta * 1.15f + 20.0f);
+        float salida_pid  = constrain(kp_din * error_actual + cfg.kd_phys * d_filt, -pid_cap, pid_cap);
+
+        float alpha_slow  = dt_s / (TAU_SLOW + dt_s);
+        u_slow += alpha_slow * (u_err - u_slow);
+        float u_jump      = fmaxf(0.0f, u_err - u_slow);
+        float brake_floor = -fminf(85.0f, (float)cfg.vel_recta * 0.65f);
+        float vel_base    = fmaxf((float)cfg.vel_curva, (float)cfg.vel_recta - (float)cfg.k_freno * u_err);
+        float vel_din     = fmaxf(brake_floor, vel_base - cfg.k_freno_dyn * (float)cfg.k_freno * u_jump);
+
+        mot_rampa = fminf(1.0f, mot_rampa + dt_s / MOT_RAMPA_S);
+        int pwm_max_fwd = min(230, max(cfg.vel_recta + 35, cfg.vel_curva + 35));
+        int pwm_min_rev = -(int)lroundf(fminf(85.0f, (float)cfg.vel_recta * 0.70f));
+
+        float tgt_A = constrain((vel_din + salida_pid) * mot_rampa, (float)pwm_min_rev, (float)pwm_max_fwd);
+        float tgt_B = constrain((vel_din - salida_pid) * mot_rampa, (float)pwm_min_rev, (float)pwm_max_fwd);
+
+        mot_cmd_L = slewUnMotor(mot_cmd_L, tgt_A, dt_s);
+        mot_cmd_R = slewUnMotor(mot_cmd_R, tgt_B, dt_s);
+        setMotors((int)lroundf(mot_cmd_L), (int)lroundf(mot_cmd_R));
+
+        int t_base = cfg.turbina_base_pct;
+        if (modo_competencia && t_base < 20) t_base = COMP_DEF.turbina_base_pct;
+        int t_curva = (t_base == 0 && !modo_competencia) ? 0 : max(t_base, cfg.turbina_curva_pct);
+
+        float turb_tgt = (float)t_base + (float)(t_curva - t_base) * u_err;
+        if (!turbina_rampa_done) {
+          turb_cmd += (float)max(t_base, 1) * (dt_s / TURB_RAMPA_S);
+          if (turb_cmd >= (float)t_base) {
+            turb_cmd = (float)t_base;
+            turbina_rampa_done = true;
+          }
+        } else if (turb_tgt >= turb_cmd) {
+          turb_cmd = fminf(turb_tgt, turb_cmd + TURB_SLEW_PCT_S * dt_s);
+        } else {
+          turb_cmd = turb_tgt + (turb_cmd - turb_tgt) * expf(-dt_s / TAU_TURB_DECAY);
+        }
+        setTurbinaFloat(turb_cmd);
+      }
     }
 
     error_anterior = error_actual;
@@ -1137,8 +1218,8 @@ void loop() {
     }
   }
 
-  // En modo Pits o detenido cedemos 1 ms a Wi-Fi/RTOS; en competencia activa corremos a 500 Hz sin delay
-  if (!modo_competencia || !seguidor_activo) {
+  // En reposo cedemos 1 ms a Wi-Fi/RTOS; corriendo no bloqueamos el lazo de 4 ms / 2 ms
+  if (!seguidor_activo) {
     delay(1);
   }
 }

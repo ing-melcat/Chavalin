@@ -46,15 +46,18 @@ const uint8_t  PWM_RES  = 8;
 
 bool ciclo_automatico = false;
 int  pwm_test = 160;
+int  curA = 0;
+int  curB = 0;
 
 void setMotorA(int speed) {
   speed = constrain(speed, -255, 255);
+  // Motor A (Izq) tiene polaridad física invertida en cableado: adelante = AI2 PWM
   if (speed > 0) {
-    ledcWrite(PIN_MOT_A1, speed);
-    ledcWrite(PIN_MOT_A2, 0);
-  } else if (speed < 0) {
     ledcWrite(PIN_MOT_A1, 0);
-    ledcWrite(PIN_MOT_A2, -speed);
+    ledcWrite(PIN_MOT_A2, speed);
+  } else if (speed < 0) {
+    ledcWrite(PIN_MOT_A1, -speed);
+    ledcWrite(PIN_MOT_A2, 0);
   } else {
     ledcWrite(PIN_MOT_A1, 0);
     ledcWrite(PIN_MOT_A2, 0);
@@ -82,6 +85,26 @@ void setMotors(int speedA, int speedB) {
 
 void stopMotors() {
   setMotors(0, 0);
+  curA = 0;
+  curB = 0;
+}
+
+void irSuaveMotores(int tgtA, int tgtB) {
+  while (curA != tgtA || curB != tgtB) {
+    int nextA = tgtA;
+    int nextB = tgtB;
+    if ((curA > 0 && tgtA < 0) || (curA < 0 && tgtA > 0)) nextA = 0;
+    if ((curB > 0 && tgtB < 0) || (curB < 0 && tgtB > 0)) nextB = 0;
+
+    if (curA < nextA) curA = min(nextA, curA + 20);
+    else if (curA > nextA) curA = max(nextA, curA - 20);
+
+    if (curB < nextB) curB = min(nextB, curB + 20);
+    else if (curB > nextB) curB = max(nextB, curB - 20);
+
+    setMotors(curA, curB);
+    delay(20);
+  }
 }
 
 void brakeMotors() {
@@ -112,34 +135,33 @@ bool esperarConAborto(uint32_t ms) {
 void ejecutarSecuenciaMotores() {
   Serial.println("\n------------------------------------------------------");
   Serial.println(">> [1/5] MOTOR A (Izquierdo: GPIO 1/2) -> ADELANTE (PWM 140)");
-  setMotors(140, 0);
+  irSuaveMotores(140, 0);
   if (!esperarConAborto(1500)) return;
-  stopMotors();
+  irSuaveMotores(0, 0);
   if (!esperarConAborto(500)) return;
 
   Serial.println(">> [2/5] MOTOR A (Izquierdo: GPIO 1/2) -> REVERSA  (PWM -140)");
-  setMotors(-140, 0);
+  irSuaveMotores(-140, 0);
   if (!esperarConAborto(1500)) return;
-  stopMotors();
+  irSuaveMotores(0, 0);
   if (!esperarConAborto(500)) return;
 
   Serial.println(">> [3/5] MOTOR B (Derecho:   GPIO 3/8) -> ADELANTE (PWM 140)");
-  setMotors(0, 140);
+  irSuaveMotores(0, 140);
   if (!esperarConAborto(1500)) return;
-  stopMotors();
+  irSuaveMotores(0, 0);
   if (!esperarConAborto(500)) return;
 
   Serial.println(">> [4/5] MOTOR B (Derecho:   GPIO 3/8) -> REVERSA  (PWM -140)");
-  setMotors(0, -140);
+  irSuaveMotores(0, -140);
   if (!esperarConAborto(1500)) return;
-  stopMotors();
+  irSuaveMotores(0, 0);
   if (!esperarConAborto(500)) return;
 
-  Serial.println(">> [5/5] AMBOS MOTORES -> ADELANTE (PWM 160) + FRENO");
-  setMotors(160, 160);
+  Serial.println(">> [5/5] AMBOS MOTORES -> ADELANTE (PWM 160) + PARO SUAVE");
+  irSuaveMotores(160, 160);
   if (!esperarConAborto(1500)) return;
-  brakeMotors();
-  delay(200);
+  irSuaveMotores(0, 0);
   stopMotors();
   Serial.println(">> [OK] Ciclo terminado. Repitiendo en 3 s ('s' para detener)...");
 }
@@ -162,8 +184,9 @@ void imprimirMenu() {
 void probarManual(const char* desc, int sA, int sB, uint32_t ms) {
   ciclo_automatico = false;
   Serial.printf(">> [MANUAL PWM=%d] %s\n", pwm_test, desc);
-  setMotors(sA, sB);
+  irSuaveMotores(sA, sB);
   if (esperarConAborto(ms)) {
+    irSuaveMotores(0, 0);
     stopMotors();
     Serial.println(">> Detenido.");
   }

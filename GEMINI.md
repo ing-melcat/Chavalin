@@ -10,8 +10,8 @@
   - `PWMA`, `PWMB`, `STBY` -> **3.3V / VCC** (Siempre habilitados por hardware en esquemático)
   - `VM` -> Batería 12V (`BT1`)
   - **Método de Control:** Como `PWMA` y `PWMB` están fijas a VCC, el control de velocidad y dirección se hace por modulación PWM directa sobre los pares `(AI1, AI2)` y `(BI1, BI2)` usando hardware LEDC a **20 kHz** (ultrasónico/silencioso, resolución 8 bits: 0 a 255):
-    - *Adelante:* `IN1 = PWM`, `IN2 = 0`
-    - *Reversa:* `IN1 = 0`, `IN2 = PWM`
+    - *Adelante:* Motor B (`BI1 = PWM, BI2 = 0`); Motor A tiene polaridad física invertida (`AI1 = 0, AI2 = PWM`)
+    - *Reversa:* Motor B (`BI1 = 0, BI2 = PWM`); Motor A (`AI1 = PWM, AI2 = 0`)
     - *Freno:* `IN1 = 255`, `IN2 = 255`
     - *Paro (libre):* `IN1 = 0`, `IN2 = 0`
 - **Multiplexor Analógico (U5 - CD74HC4067):**
